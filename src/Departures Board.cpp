@@ -2136,9 +2136,18 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
   if (serviceId < station.numServices) {
     if (boardMode == MODE_LETBANE) {
       // Rejseplanen doesn't provide a "seconds/minutes to arrival" countdown like TfL, so
-      // always show the (possibly realtime) clock time instead - never a "Due"/"X mins" style countdown.
-      char letbaneTime[6];
-      strlcpy(letbaneTime, isDigit(station.service[serviceId].etd[0]) ? station.service[serviceId].etd : station.service[serviceId].sTime, sizeof(letbaneTime));
+      // compute an approximate one from the (possibly realtime) clock time vs. the board's own
+      // current time, mimicking the tube board's "X min" style rather than showing a bare clock time.
+      const char *timeStr = isDigit(station.service[serviceId].etd[0]) ? station.service[serviceId].etd : station.service[serviceId].sTime;
+      int svcH=0, svcM=0;
+      sscanf(timeStr, "%d:%d", &svcH, &svcM);
+      int delta = (svcH*60+svcM) - getTimeInMinutes();
+      if (delta < -60) delta += 1440;      // rolled over past midnight
+      else if (delta < 0) delta = 0;       // small negative from clock drift/refresh lag - treat as due now
+
+      char letbaneTime[8];
+      if (delta == 0) strcpy(letbaneTime,"Nu");
+      else sprintf(letbaneTime,"%d min",delta);
       int timeWidth = getStringWidth(letbaneTime);
       u8g2.drawStr(SCREEN_WIDTH-timeWidth,y-1,letbaneTime);
       usedSpace += timeWidth + 8;
@@ -2250,7 +2259,7 @@ void drawBusService(int serviceId, int y, int destPos) {
     int etdWidth = 25;
     if (isDigit(station.service[serviceId].etd[0])) {
       sprintf(etd,boardMode==MODE_DKBUS?"Forventet %s":"Exp %s",station.service[serviceId].etd);
-      etdWidth = 47;
+      etdWidth = (boardMode==MODE_DKBUS) ? getStringWidth(etd)+6 : 47;
     } else if (boardMode==MODE_DKBUS && station.service[serviceId].etd[0]) {
       // "Aflyst"/"Rettidig" - show the Danish status word rather than falling back to sTime
       strcpy(etd,station.service[serviceId].etd);
