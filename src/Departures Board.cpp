@@ -312,7 +312,7 @@ static const char dkAttribution[] = "Data fra Rejseplanen";
 // Danish weekday/month names - strftime()'s %a/%b/%B always come out in English on this platform
 // (the ESP32 Arduino/newlib build has no da_DK locale data compiled in, so setlocale() can't help
 // here), so these are built by hand and substituted in for Danish modes instead.
-static const char* const dkWeekdayShort[7] = {"Son","Man","Tir","Ons","Tor","Fre","Lor"}; // tm_wday: 0=Sunday - ASCII-only, fonts have no ø glyph
+static const char* const dkWeekdayShort[7] = {"S\xF8n","Man","Tir","Ons","Tor","Fre","L\xF8r"}; // tm_wday: 0=Sunday. \xF8 = Latin-1 ø (setHeaderFont() switches to a stock font with this glyph for Danish modes)
 static const char* const dkMonthShort[12] = {"Jan","Feb","Mar","Apr","Maj","Jun","Jul","Aug","Sep","Okt","Nov","Dec"};
 static const char* const dkMonthLong[12] = {"januar","februar","marts","april","maj","juni","juli","august","september","oktober","november","december"};
 
@@ -560,6 +560,32 @@ int getStringWidth(const char *message) {
   return u8g2.getStrWidth(message);
 }
 
+// The custom hand-built pixel fonts (NatRailSmall9/NatRailTall12/Underground10) only cover
+// ASCII, so Danish station/destination names would render with missing glyphs. Rather than
+// hand-drawing new glyphs into those compiled binary font blobs (no source file to regenerate
+// them from, and no way to preview a hand-built bitmap here), Danish modes instead use one of
+// U8g2's own stock fonts - the "_tf" ("transparent, full") variants ship the complete ISO 8859-1
+// Latin-1 glyph set, which includes æ/ø/å/Æ/Ø/Å at single-byte codepoints 0xE6/0xF8/0xE5/0xC6/
+// 0xD8/0xC5. Latin-1 (0-255) glyph lookup works regardless of the -DU8G2_WITHOUT_UNICODE build
+// flag - that flag only disables the *multi-byte* UTF-8 decoding path for codepoints above 255,
+// so no other build changes are needed. rejseplanenClient converts incoming UTF-8 into these
+// same single-byte codepoints (see convertDanishToLatin1()) so the strings match up.
+void setSmallFont() {
+  u8g2.setFont((boardMode==MODE_DKRAIL || boardMode==MODE_DKBUS) ? u8g2_font_6x10_tf : NatRailSmall9);
+}
+void setTallFont() {
+  u8g2.setFont((boardMode==MODE_DKRAIL) ? u8g2_font_6x12_tf : NatRailTall12);
+}
+void setTubeFont() {
+  u8g2.setFont((boardMode==MODE_LETBANE) ? u8g2_font_6x10_tf : Underground10);
+}
+// The station header title (drawStationHeader) is always drawn in NatRailSmall9 regardless of
+// mode - unlike setSmallFont()/setTubeFont() this needs to catch all three Danish modes, since
+// Letbane's own body text uses setTubeFont() but still shares this same header function.
+void setHeaderFont() {
+  u8g2.setFont((boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS) ? u8g2_font_6x10_tf : NatRailSmall9);
+}
+
 void drawTruncatedText(const char *message, int line, int x) {
   char buff[strlen(message)+4];
   int maxWidth = SCREEN_WIDTH - 6 - x;
@@ -630,7 +656,7 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
     blankArea(0,LINE0,256,LINE1-1);
   }
 
-  u8g2.setFont(NatRailSmall9);
+  setHeaderFont();
   char boardTitle[95];
   strlcpy(boardTitle,stopName,sizeof(boardTitle));
   if (timeOffset || platFilter[0] || callingStopName[0]) strlcat(boardTitle," ",sizeof(boardTitle));
@@ -1818,7 +1844,7 @@ void drawPrimaryService(bool showVia) {
   char etd[16];
   char plat[9];
 
-  u8g2.setFont(NatRailTall12);
+  setTallFont();
   blankArea(0,LINE1,256,LINE2-LINE1);
   destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
   if (isDigit(station.service[0].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[0].etd);
@@ -1849,7 +1875,7 @@ void drawPrimaryService(bool showVia) {
   }
   u8g2.drawStr(destPos,LINE1-1,clipDestination);
   // Set font back to standard
-  u8g2.setFont(NatRailSmall9);
+  setSmallFont();
 }
 
 // Draw the secondary service line
@@ -1875,7 +1901,7 @@ void drawServiceLine(int line, int y) {
     }
   }
 
-  u8g2.setFont(NatRailSmall9);
+  setSmallFont();
   blankArea(0,y,256,9);
 
   if (line<station.numServices) {
@@ -2015,7 +2041,7 @@ void drawStationBoard() {
             }
           } else {
             if (station.origin[0]) {
-              sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Toget koerte oprindeligt fra %s.":"This service originated at %s.",station.origin);
+              sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Toget k\xF8rte oprindeligt fra %s.":"This service originated at %s.",station.origin);
             }
           }
           // Add the seating if available
@@ -2044,12 +2070,13 @@ void drawStationBoard() {
       }
     } else {
       blankArea(0,LINE2,256,LINE4-LINE2);
-      u8g2.setFont(NatRailTall12);
+      setTallFont();
       centreText(boardMode==MODE_DKRAIL?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled services at this station.",LINE1-1);
     }
   } else {
     msgLine = LINE4;
     if (schedulerActive || carouselActive) {
+      u8g2.setFont(NatRailSmall9); // these are icon glyphs from the custom font, not Danish text - never swap this one
       if (schedulerActive) {
         u8g2.drawStr(0,LINE4,"\x87");
         msgMargin = 11;
@@ -2081,7 +2108,7 @@ void drawStationBoard() {
   isScrollingStops=false;
   currentMessage=numMessages-1;
 
-  u8g2.setFont(NatRailSmall9);
+  setSmallFont();
   u8g2.sendBuffer();
 }
 
@@ -2120,13 +2147,13 @@ bool drawCurrentTimeUG() {
     u8g2.drawStr(99,ULINE4-1,currentTime);
     u8g2.updateDisplayArea(12,7,8,1);
     strcpy(displayedTime,currentTime);
-    u8g2.setFont(Underground10);
+    setTubeFont();
 
     if (dateEnabled && timeinfo.tm_mday!=dateDay) {
       if (boardMode == MODE_TUBE) drawStationHeader(locationName,"","",0);
       else drawStationHeader(locationName,"",locationFilter,0);
       u8g2.sendBuffer();  // Just refresh on new date
-      u8g2.setFont(Underground10);
+      setTubeFont();
     }
     return true;
   } else {
@@ -2146,7 +2173,7 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
   char serviceData[4+MAXLOCATIONSIZE];
   int usedSpace = 4;
 
-  u8g2.setFont(Underground10);
+  setTubeFont();
   blankArea(0,y,256,10);
 
   if (serviceId < station.numServices) {
@@ -2225,7 +2252,7 @@ void drawUndergroundBoard() {
       drawUndergroundService(0,ULINE1);
       if (station.numServices>1) drawUndergroundService(1,ULINE2);
     } else {
-      u8g2.setFont(Underground10);
+      setTubeFont();
       centreText(boardMode==MODE_LETBANE?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled arrivals at this station.",ULINE1-1);
     }
   }
@@ -2269,7 +2296,7 @@ void drawBusService(int serviceId, int y, int destPos) {
   char etd[16];
 
   if (serviceId < station.numServices) {
-    u8g2.setFont(NatRailSmall9);
+    setSmallFont();
     blankArea(0,y,256,9);
 
     u8g2.drawStr(0,y-1,station.service[serviceId].via);
@@ -2348,7 +2375,7 @@ void updateBusDepartures() {
   dataLoadSuccess++;
   // Work out the max column size for service numbers
   busDestX=0;
-  u8g2.setFont(NatRailSmall9);
+  setSmallFont(); // must match drawBusService()'s font, or the column width measurement will be wrong
   for (int i=0;i<station.numServices;i++) {
     int svcWidth = getStringWidth(station.service[i].via);
     busDestX = (busDestX > svcWidth) ? busDestX : svcWidth;
@@ -2991,7 +3018,7 @@ void undergroundArrivalsLoop() {
       drawUndergroundService(0,ULINE1,(showTubeCurrentLocation && isShowingVia && station.origin[0]));
       if (station.numServices>1) drawUndergroundService(1,ULINE2);
     } else {
-      u8g2.setFont(Underground10);
+      setTubeFont();
       blankArea(0,ULINE1,256,ULINE3-ULINE1);
       centreText(boardMode==MODE_LETBANE?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled arrivals at this station.",ULINE1-1);
     }
@@ -3123,7 +3150,7 @@ void undergroundArrivalsLoop() {
     // we're scrolling the primary service(s) into view
     u8g2.setClipWindow(0,ULINE1,256,ULINE1+10);
     if (station.numServices) drawUndergroundService(0,scrollPrimaryYpos+ULINE1-1);
-    else centreText("There are no scheduled arrivals at this station.",scrollPrimaryYpos+ULINE1-1);
+    else centreText(boardMode==MODE_LETBANE?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled arrivals at this station.",scrollPrimaryYpos+ULINE1-1);
     if (station.numServices>1) {
       u8g2.setClipWindow(0,ULINE2,256,ULINE2+10);
       drawUndergroundService(1,scrollPrimaryYpos+ULINE2-1);
@@ -3172,9 +3199,9 @@ void busDeparturesLoop() {
       drawBusService(0,ULINE1,busDestX);
       if (station.numServices>1) drawBusService(1,ULINE2,busDestX);
     } else {
-      u8g2.setFont(NatRailSmall9);
+      setSmallFont();
       blankArea(0,ULINE1,256,ULINE3-ULINE1);
-      centreText("There are no scheduled services at this stop.",ULINE1-1);
+      centreText(boardMode==MODE_DKBUS?"Der er ingen planlagte afgange fra dette stoppested.":"There are no scheduled services at this stop.",ULINE1-1);
     }
     fullRefresh = true;
   }
@@ -3259,7 +3286,7 @@ void busDeparturesLoop() {
     // we're scrolling the primary service(s) into view
     u8g2.setClipWindow(0,ULINE1,256,ULINE1+10);
     if (station.numServices) drawBusService(0,scrollPrimaryYpos+ULINE1-1,busDestX);
-    else centreText("There are no scheduled services at this stop.",scrollPrimaryYpos+ULINE1-1);
+    else centreText(boardMode==MODE_DKBUS?"Der er ingen planlagte afgange fra dette stoppested.":"There are no scheduled services at this stop.",scrollPrimaryYpos+ULINE1-1);
     if (station.numServices>1) {
       u8g2.setClipWindow(0,ULINE2,256,ULINE2+10);
       drawBusService(1,scrollPrimaryYpos+ULINE2-1,busDestX);
@@ -3282,7 +3309,7 @@ void busDeparturesLoop() {
 
   if (!isSleeping) {
     // just use the Tube clock for bus mode
-    if (drawCurrentTimeUG()) u8g2.setFont(NatRailSmall9);
+    if (drawCurrentTimeUG()) setSmallFont();
 
     delayMs = frameTimeBus - (millis()-refreshTimer);
     if (delayMs>0) delay(delayMs);

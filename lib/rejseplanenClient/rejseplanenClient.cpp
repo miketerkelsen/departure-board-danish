@@ -38,32 +38,27 @@ static void truncateSeconds(char* t) {
     if (t[0] && strlen(t) > 5 && t[2] == ':' && t[5] == ':') t[5] = '\0';
 }
 
-// Replace Danish æ/ø/å (UTF-8 encoded) with a plain-ASCII transliteration, since the board's
-// custom bitmap fonts have no glyphs for them (-DU8G2_WITHOUT_UNICODE).
-void rejseplanenClient::transliterateDanish(char* input, size_t maxLen) {
+// Rejseplanen sends station/destination names as UTF-8, so æ/ø/å (and other Latin-1 supplement
+// letters, e.g. é) arrive as 2-byte sequences (0xC3 0x80-0xBF). The board's fonts are built with
+// -DU8G2_WITHOUT_UNICODE, but that flag only disables *multi-byte* UTF-8 decoding for codepoints
+// above 255 - single-byte lookup for codepoints 0-255 (which is exactly what ISO 8859-1/Latin-1
+// is) works regardless of it. U8g2's own "_tf" stock fonts already ship the full Latin-1 glyph
+// set, so rather than transliterating to "ae"/"oe"/"aa" (illegible-looking, per user feedback),
+// this converts each UTF-8 2-byte sequence down to its single-byte Latin-1 equivalent instead -
+// e.g. \xC3\xA6 (UTF-8 æ) becomes the single byte \xE6 (Latin-1 æ) - which the board then renders
+// with a real glyph, via setSmallFont()/setTallFont()/setTubeFont() switching to a Latin-1-aware
+// stock font for Danish modes (see "Departures Board.cpp").
+void rejseplanenClient::convertDanishToLatin1(char* input, size_t maxLen) {
     if (!input || !input[0]) return;
     char output[MAXLOCATIONSIZE*2];
     size_t outPos = 0;
     size_t len = strlen(input);
-    for (size_t i=0; i<len && outPos < sizeof(output)-3;) {
+    for (size_t i=0; i<len && outPos < sizeof(output)-1;) {
         unsigned char c = (unsigned char)input[i];
         if (c == 0xC3 && i+1 < len) {
             unsigned char c2 = (unsigned char)input[i+1];
-            const char* rep = nullptr;
-            switch (c2) {
-                case 0xA6: rep = "ae"; break; // æ
-                case 0x86: rep = "Ae"; break; // Æ
-                case 0xB8: rep = "oe"; break; // ø
-                case 0x98: rep = "Oe"; break; // Ø
-                case 0xA5: rep = "aa"; break; // å
-                case 0x85: rep = "Aa"; break; // Å
-            }
-            if (rep) {
-                size_t repLen = strlen(rep);
-                if (outPos + repLen < sizeof(output)) {
-                    memcpy(output+outPos, rep, repLen);
-                    outPos += repLen;
-                }
+            if (c2 >= 0x80 && c2 <= 0xBF) {
+                output[outPos++] = (char)(unsigned char)(0xC0 | (c2 & 0x3F)); // -> Latin-1 0xC0-0xFF
                 i += 2;
                 continue;
             }
@@ -101,7 +96,7 @@ void rejseplanenClient::finaliseDepartureRecord() {
     truncateSeconds(svc.sTime);
 
     strlcpy(svc.destination, raw.direction, sizeof(svc.destination));
-    transliterateDanish(svc.destination, sizeof(svc.destination));
+    convertDanishToLatin1(svc.destination, sizeof(svc.destination));
 
     strlcpy(svc.via, raw.name, sizeof(svc.via));
     strlcpy(svc.opco, raw.opco, sizeof(svc.opco));
@@ -137,7 +132,7 @@ void rejseplanenClient::finaliseCallingStop() {
     if (!stopScratchName[0]) return;
     if (numCallingStops >= (int)(sizeof(callingStops)/sizeof(callingStops[0]))) return;
     strlcpy(callingStops[numCallingStops].name, stopScratchName, sizeof(callingStops[0].name));
-    transliterateDanish(callingStops[numCallingStops].name, sizeof(callingStops[0].name));
+    convertDanishToLatin1(callingStops[numCallingStops].name, sizeof(callingStops[0].name));
     strlcpy(callingStops[numCallingStops].extId, stopScratchExtId, sizeof(callingStops[0].extId));
     // Prefer the arrival time (when the train reaches this calling point), falling back to the
     // departure time for stops that only have one (e.g. the very first/last stop of the journey).

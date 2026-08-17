@@ -94,7 +94,7 @@ class rejseplanenClient: public JsonListenerGS {
         void resetRawRecord();
         void finaliseDepartureRecord();
         void finaliseCallingStop();
-        void transliterateDanish(char* input, size_t maxLen);
+        void convertDanishToLatin1(char* input, size_t maxLen);
         void buildCurrentPath(const char* key);
         int getServiceDetails(const char *ref, const char *accessId, const char *stopId);
 
