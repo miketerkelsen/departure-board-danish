@@ -494,6 +494,7 @@ static int prevService = 0;
 static bool isShowingVia=false;
 static unsigned long serviceTimer=0;
 static unsigned long viaTimer=0;
+static unsigned long letbaneBlinkTimer=0;
 static bool showingMessage = false;
 
 // TfL/bus specific animation
@@ -2149,7 +2150,9 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
       if (delta == 0) strcpy(letbaneTime,"Nu");
       else sprintf(letbaneTime,"%d min",delta);
       int timeWidth = getStringWidth(letbaneTime);
-      u8g2.drawStr(SCREEN_WIDTH-timeWidth,y-1,letbaneTime);
+      // Blink the time (500ms on/off) once it's due or arriving within a minute, to draw the eye to it
+      bool blinkVisible = (delta > 1) || ((millis()/500) % 2 == 0);
+      if (blinkVisible) u8g2.drawStr(SCREEN_WIDTH-timeWidth,y-1,letbaneTime);
       usedSpace += timeWidth + 8;
     } else if (serviceId || (strcmp(station.origin,"At Platform") && station.service[0].timeToStation>10)) {
       if (station.service[serviceId].timeToStation <= 40) {
@@ -2998,6 +3001,15 @@ void undergroundArrivalsLoop() {
     } else {
       dataLoadFailure++;
     }
+  }
+
+  // Letbane: redraw the primary rows periodically so the "due soon" blink actually animates -
+  // nothing else in this loop repaints them on a fast enough cadence when idle between fetches.
+  if (boardMode == MODE_LETBANE && !isScrollingPrimary && !isSleeping && station.numServices && millis() > letbaneBlinkTimer) {
+    letbaneBlinkTimer = millis() + 500;
+    drawUndergroundService(0,ULINE1,(showTubeCurrentLocation && isShowingVia && station.origin[0]));
+    if (station.numServices>1) drawUndergroundService(1,ULINE2);
+    u8g2.updateDisplayArea(0,1,32,6); // wide enough to cover both primary rows, not just row 0
   }
 
   // Check if we're showing currentLocation
