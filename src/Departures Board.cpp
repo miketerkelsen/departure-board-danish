@@ -574,16 +574,34 @@ static bool isDanishAccentByte(unsigned char c) {
 }
 
 int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
-  const uint8_t *baseFont = u8g2.getU8g2()->font;
+  // The board runs in setFontPosTop()+setFontRefHeightAll() mode, which recalculates u8g2's
+  // internal vertical reference point (font_ref_ascent) from the ACTIVE font's own metadata every
+  // time setFont() is called - u8g2_SetFont() -> u8g2_UpdateRefHeight() does this automatically.
+  // That reference point directly shifts where "y" ends up drawing on screen. Since the accent
+  // font's metadata differs from the base font's, swapping fonts mid-string (as every accented
+  // character does here) silently shifts just that one character up or down relative to its
+  // neighbours by however much the two fonts' computed reference ascents differ (this is what was
+  // making accented letters look vertically misaligned, most visibly on the primary departure
+  // line). Cache the base font's reference ascent, then after switching to the accent font, shift y
+  // by the difference so the accent glyph lands on the exact same visual baseline as the rest of
+  // the line, regardless of which stock font is used for it.
+  u8g2_t *u = u8g2.getU8g2();
+  const uint8_t *baseFont = u->font;
+  int8_t baseAscent = u8g2_GetFontAscent(u);
   int cursorX = x;
   char buf[2] = {0,0};
   for (const char *p = text; *p; p++) {
     unsigned char c = (unsigned char)*p;
     buf[0] = (char)c;
     bool isAccent = isDanishAccentByte(c);
-    if (isAccent) u8g2.setFont(accentFont);
-    cursorX += u8g2.drawStr(cursorX, y, buf);
-    if (isAccent) u8g2.setFont(baseFont);
+    if (isAccent) {
+      u8g2.setFont(accentFont);
+      int yShift = baseAscent - u8g2_GetFontAscent(u);
+      cursorX += u8g2.drawStr(cursorX, y+yShift, buf);
+      u8g2.setFont(baseFont);
+    } else {
+      cursorX += u8g2.drawStr(cursorX, y, buf);
+    }
   }
   return cursorX - x;
 }
@@ -747,7 +765,7 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
 
   int titleOffset = 0;
   if (schedulerActive || carouselActive) titleOffset = 13;
-  const uint8_t *accentFont = u8g2_font_5x8_tf; // matches setHeaderFont()'s NatRailSmall9
+  const uint8_t *accentFont = u8g2_font_6x10_tf; // matches setHeaderFont()'s NatRailSmall9
   int boardTitleWidth = getMixedStringWidth(boardTitle,accentFont);
 
   if (dateEnabled) {
@@ -1940,15 +1958,15 @@ void drawPrimaryService(bool showVia) {
     strcpy(clipDestination,station.service[0].destination);
     if (station.service[0].serviceType == BUS) strcat(clipDestination," ~");  // Add bus icon to destination
   }
-  if (getMixedStringWidth(clipDestination,u8g2_font_6x12_tf) > spaceAvailable) {
-    while (getMixedStringWidth(clipDestination,u8g2_font_6x12_tf) > (spaceAvailable - 8)) {
+  if (getMixedStringWidth(clipDestination,u8g2_font_6x13_tf) > spaceAvailable) {
+    while (getMixedStringWidth(clipDestination,u8g2_font_6x13_tf) > (spaceAvailable - 8)) {
       clipDestination[strlen(clipDestination)-1] = '\0';
     }
     // check if there's a trailing space left
     if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
     strcat(clipDestination,"...");
   }
-  drawMixedStr(destPos,LINE1-1,clipDestination,u8g2_font_6x12_tf);
+  drawMixedStr(destPos,LINE1-1,clipDestination,u8g2_font_6x13_tf);
   // Set font back to standard
   setSmallFont();
 }
@@ -2002,15 +2020,15 @@ void drawServiceLine(int line, int y) {
     // work out if we need to clip the destination
     strcpy(clipDestination,station.service[line].destination);
     if (station.service[line].serviceType == BUS) strcat(clipDestination," \x86"); // Add bus icon
-    if (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable) {
-      while (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable - 5) {
+    if (getMixedStringWidth(clipDestination,u8g2_font_6x10_tf) > spaceAvailable) {
+      while (getMixedStringWidth(clipDestination,u8g2_font_6x10_tf) > spaceAvailable - 5) {
         clipDestination[strlen(clipDestination)-1] = '\0';
       }
       // check if there's a trailing space left
       if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
       strcat(clipDestination,"...");
     }
-    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_5x8_tf);
+    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_6x10_tf);
   } else {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
@@ -2375,7 +2393,7 @@ void drawBusService(int serviceId, int y, int destPos) {
     setSmallFont();
     blankArea(0,y,256,9);
 
-    drawMixedStr(0,y-1,station.service[serviceId].via,u8g2_font_5x8_tf);
+    drawMixedStr(0,y-1,station.service[serviceId].via,u8g2_font_6x10_tf);
     int etdWidth = 25;
     if (isDigit(station.service[serviceId].etd[0])) {
       sprintf(etd,boardMode==MODE_DKBUS?"Forventet %s":"Exp %s",station.service[serviceId].etd);
@@ -2390,15 +2408,15 @@ void drawBusService(int serviceId, int y, int destPos) {
     // work out if we need to clip the destination
     strcpy(clipDestination,station.service[serviceId].destination);
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
-    if (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable) {
-      while (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable - 17) {
+    if (getMixedStringWidth(clipDestination,u8g2_font_6x10_tf) > spaceAvailable) {
+      while (getMixedStringWidth(clipDestination,u8g2_font_6x10_tf) > spaceAvailable - 17) {
         clipDestination[strlen(clipDestination)-1] = '\0';
       }
       // check if there's a trailing space left
       if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
       strcat(clipDestination,"...");
     }
-    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_5x8_tf);
+    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_6x10_tf);
   }
 }
 
@@ -2978,7 +2996,7 @@ void departureBoardLoop() {
     if (currentMessage>=numMessages) currentMessage=0;
     scrollStopsXpos=msgMargin;
     scrollStopsYpos=10;
-    scrollStopsLength = getMixedStringWidth(line2[currentMessage],u8g2_font_5x8_tf);
+    scrollStopsLength = getMixedStringWidth(line2[currentMessage],u8g2_font_6x10_tf);
     isScrollingStops=true;
     if (isCallingMessage(line2[currentMessage])) isShowingCalling=true; else isShowingCalling=false;
   }
@@ -3026,17 +3044,17 @@ void departureBoardLoop() {
       // we're scrolling up the message initially
       // if the previous message didn't scroll then we need to scroll it up off the screen
       if (prevScrollStopsLength && prevScrollStopsLength<msgWidth) {
-        if (!isCallingMessage(line2[prevMessage])) centreMixedText(line2[prevMessage],scrollStopsYpos+msgLine-12,u8g2_font_5x8_tf,msgMargin,msgWidth);
-        else drawMixedStr(msgMargin,scrollStopsYpos+msgLine-12,line2[prevMessage],u8g2_font_5x8_tf); // Handle very short calling at lists
+        if (!isCallingMessage(line2[prevMessage])) centreMixedText(line2[prevMessage],scrollStopsYpos+msgLine-12,u8g2_font_6x10_tf,msgMargin,msgWidth);
+        else drawMixedStr(msgMargin,scrollStopsYpos+msgLine-12,line2[prevMessage],u8g2_font_6x10_tf); // Handle very short calling at lists
       }
-      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreMixedText(line2[currentMessage],scrollStopsYpos+msgLine-2,u8g2_font_5x8_tf,msgMargin,msgWidth); // Centre text if it fits
-      else drawMixedStr(msgMargin,scrollStopsYpos+msgLine-2,line2[currentMessage],u8g2_font_5x8_tf);
+      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreMixedText(line2[currentMessage],scrollStopsYpos+msgLine-2,u8g2_font_6x10_tf,msgMargin,msgWidth); // Centre text if it fits
+      else drawMixedStr(msgMargin,scrollStopsYpos+msgLine-2,line2[currentMessage],u8g2_font_6x10_tf);
       scrollStopsYpos--;
       if (scrollStopsYpos==0) timer=millis()+1500;
     } else {
       // we're scrolling left
-      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreMixedText(line2[currentMessage],msgLine-1,u8g2_font_5x8_tf,msgMargin,msgWidth); // Centre text if it fits
-      else drawMixedStr(scrollStopsXpos,msgLine-1,line2[currentMessage],u8g2_font_5x8_tf);
+      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreMixedText(line2[currentMessage],msgLine-1,u8g2_font_6x10_tf,msgMargin,msgWidth); // Centre text if it fits
+      else drawMixedStr(scrollStopsXpos,msgLine-1,line2[currentMessage],u8g2_font_6x10_tf);
       if (scrollStopsLength < msgWidth) {
         // we don't need to scroll this message, it fits so just set a longer timer
         timer=millis()+6000;
@@ -3355,13 +3373,13 @@ void busDeparturesLoop() {
         drawBusService(prevService,scrollServiceYpos+ULINE3-13,busDestX);
       } else {
         // Scrolling up the previous message
-        centreMixedText(line2[prevMessage],scrollServiceYpos+ULINE3-13,u8g2_font_5x8_tf);
+        centreMixedText(line2[prevMessage],scrollServiceYpos+ULINE3-13,u8g2_font_6x10_tf);
       }
       // Is this entry a service?
       if (line3Service<station.numServices) {
         drawBusService(line3Service,scrollServiceYpos+ULINE3-1,busDestX);
       } else {
-        centreMixedText(line2[currentMessage],scrollServiceYpos+ULINE3-2,u8g2_font_5x8_tf);
+        centreMixedText(line2[currentMessage],scrollServiceYpos+ULINE3-2,u8g2_font_6x10_tf);
       }
       u8g2.setMaxClipWindow();
       scrollServiceYpos--;
