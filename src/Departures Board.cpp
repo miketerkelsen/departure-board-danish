@@ -309,6 +309,13 @@ static const char rdgAttribution[] = "Powered by Rail Delivery Group";
 static const char btAttribution[] = "Powered by bustimes.org";
 static const char dkAttribution[] = "Data fra Rejseplanen";
 
+// Danish weekday/month names - strftime()'s %a/%b/%B always come out in English on this platform
+// (the ESP32 Arduino/newlib build has no da_DK locale data compiled in, so setlocale() can't help
+// here), so these are built by hand and substituted in for Danish modes instead.
+static const char* const dkWeekdayShort[7] = {"Son","Man","Tir","Ons","Tor","Fre","Lor"}; // tm_wday: 0=Sunday - ASCII-only, fonts have no ø glyph
+static const char* const dkMonthShort[12] = {"Jan","Feb","Mar","Apr","Maj","Jun","Jul","Aug","Sep","Okt","Nov","Dec"};
+static const char* const dkMonthLong[12] = {"januar","februar","marts","april","maj","juni","juli","august","september","oktober","november","december"};
+
 #define LETBANE_PRODUCTS 2048          // Rejseplanen product bitmask: bit 11 (Letbane)
 #define DKBUS_PRODUCTS 32              // Rejseplanen product bitmask: bit 5 (Bus)
 
@@ -652,7 +659,11 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
     int const dateY=55;
     // Get the date
     char sysTime[29];
-    strftime(sysTime,29,"%a %d %b",&timeinfo);
+    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS) {
+      sprintf(sysTime,"%s %02d %s",dkWeekdayShort[timeinfo.tm_wday],timeinfo.tm_mday,dkMonthShort[timeinfo.tm_mon]);
+    } else {
+      strftime(sysTime,29,"%a %d %b",&timeinfo);
+    }
     dateWidth = getStringWidth(sysTime);
     dateDay = timeinfo.tm_mday;
     if (callingStopName[0] || boardTitleWidth+dateWidth+10+titleOffset>=SCREEN_WIDTH) {
@@ -805,7 +816,11 @@ void drawSleepingScreen() {
   u8g2.clearBuffer();
   if (sleepClock) {
     sprintf(sysTime,"%02d:%02d",timeinfo.tm_hour,timeinfo.tm_min);
-    strftime(sysDate,29,"%d %B %Y",&timeinfo);
+    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS) {
+      sprintf(sysDate,"%d. %s %d",timeinfo.tm_mday,dkMonthLong[timeinfo.tm_mon],timeinfo.tm_year+1900);
+    } else {
+      strftime(sysDate,29,"%d %B %Y",&timeinfo);
+    }
 
     int offset = (getStringWidth(sysDate)-44)/2;
     u8g2.setFont(NatRailClockLarge9);
@@ -2147,8 +2162,7 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
       else if (delta < 0) delta = 0;       // small negative from clock drift/refresh lag - treat as due now
 
       char letbaneTime[8];
-      if (delta == 0) strcpy(letbaneTime,"Nu");
-      else sprintf(letbaneTime,"%d min",delta);
+      sprintf(letbaneTime,"%d min",delta<1?1:delta); // never show 0/"Nu" - floor the display at "1 min"
       int timeWidth = getStringWidth(letbaneTime);
       // Blink the time (500ms on/off) once it's due or arriving within a minute, to draw the eye to it
       bool blinkVisible = (delta > 1) || ((millis()/500) % 2 == 0);
