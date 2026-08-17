@@ -150,6 +150,7 @@ void rejseplanenClient::whitespace(char c) {}
 void rejseplanenClient::startDocument() {
     stackTop = 0;
     pendingKey[0] = '\0';
+    targetElementKey[0] = '\0';
     currentPath[0] = '\0';
     inTargetArray = false;
     arrayDepth = 0;
@@ -204,6 +205,9 @@ void rejseplanenClient::startArray() {
             inTargetArray = true;
             targetArrayDepth = arrayDepth;
             arrayBaseDepth = stackTop;
+            // Capture the array's own key NOW, before it can be overwritten by key() calls made
+            // while walking each element's fields (see targetElementKey's declaration comment).
+            strlcpy(targetElementKey, pendingKey, sizeof(targetElementKey));
         }
     }
 }
@@ -214,16 +218,40 @@ void rejseplanenClient::endArray() {
 }
 
 void rejseplanenClient::startObject() {
-    if (inTargetArray && stackTop == arrayBaseDepth) {
+    // Are we about to start a new element of the target array (Departure, or Stops/Stop)?
+    bool isNewTargetElement = inTargetArray && stackTop == arrayBaseDepth;
+
+    if (isNewTargetElement) {
         if (fetchingDepartures) resetRawRecord();
         else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; }
     }
+
+    // Array elements have no key() call of their own. For a NEW target-array element, use the
+    // stable targetElementKey captured back in startArray() - NOT the live pendingKey, which by
+    // this point has been overwritten by whatever field key() was last called while walking the
+    // PREVIOUS element's own contents (e.g. "directionFlag", the last field of a Departure record).
+    // Pushing that stale value instead of "Departure"/"Stop" would build the wrong path prefix for
+    // every field in every element after the first, so none of them would ever match a known path.
+    // For every other (non-boundary) object push, pendingKey is correct as-is, since those always
+    // have a proper, immediately-preceding key() call.
+    const char *keyToPush = isNewTargetElement ? targetElementKey : pendingKey;
+
     // The anonymous document-root object has no preceding key() call - skip pushing it so
-    // paths don't gain a spurious leading "/" (every other startObject(), including each
-    // anonymous array element, always has a non-empty pendingKey carried over from the last
-    // key() seen).
-    if (pendingKey[0] && stackTop < MAXPATHSTACK) {
-        strlcpy(pathStack[stackTop], pendingKey, sizeof(pathStack[0]));
+    // paths don't gain a spurious leading "/" (every other startObject() always has a non-empty
+    // key to push, per the above).
+    //
+    // IMPORTANT: stackTop must increment every time we push (whenever keyToPush is non-empty),
+    // in lockstep with endObject()'s unconditional decrement - regardless of whether there's
+    // still room in pathStack to record the name. Some real Rejseplanen records (service alerts
+    // with Messages/Message/affectedStops/StopLocation chains) nest deeper than MAXPATHSTACK.
+    // Gating the increment on the same "is there room" check as the write would mean that once
+    // a deeply-nested record exceeded the cap, every further pop (endObject) would have no
+    // matching push to cancel out - permanently desyncing stackTop for the rest of the document
+    // and corrupting every subsequent record boundary. Fields nested deeper than MAXPATHSTACK
+    // just won't build a full/matchable path (harmless - nothing we parse lives that deep), but
+    // the depth bookkeeping itself must never drift.
+    if (keyToPush[0]) {
+        if (stackTop < MAXPATHSTACK) strlcpy(pathStack[stackTop], keyToPush, sizeof(pathStack[0]));
         stackTop++;
     }
 }

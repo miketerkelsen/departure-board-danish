@@ -18,7 +18,7 @@
 #include <sharedDataStructs.h>
 #include <responseCodes.h>
 
-#define MAXPATHSTACK 6
+#define MAXPATHSTACK 12                // headroom for deeply-nested fields (e.g. service alert Messages)
 
 class rejseplanenClient: public JsonListenerGS {
 
@@ -68,6 +68,15 @@ class rejseplanenClient: public JsonListenerGS {
         int stackTop = 0;
         char pendingKey[MAXKEYNAMESIZE];
         char currentPath[(MAXKEYNAMESIZE*MAXPATHSTACK)+MAXPATHSTACK];
+
+        // The key that named the target array itself ("Departure" or "Stop"), captured once when
+        // the array is entered. Array elements have no key() call of their own - normally an
+        // element's startObject() would reuse whatever pendingKey last held, but pendingKey keeps
+        // getting overwritten by every key() call made while walking the PREVIOUS element's own
+        // fields, so by the time element 2+ starts, pendingKey no longer says "Departure"/"Stop".
+        // targetElementKey is the one thing that must stay stable across every element of the
+        // target array, so it's captured separately here instead of relying on pendingKey for it.
+        char targetElementKey[MAXKEYNAMESIZE];
 
         bool fetchingDepartures;       // true = parsing departureBoard, false = parsing journeyDetail
         bool inTargetArray = false;    // inside the "Departure" (or "Stops/Stop") array
