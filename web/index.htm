@@ -77,6 +77,8 @@
             <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkRail"><img src="/irail.webp" class="me-2" alt=""> DK Tog</label>
             <input type="radio" class="btn-check" name="boardmode" id="modeLetbane" value="4" autocomplete="off">
             <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeLetbane"><img src="/itube.webp" class="me-2" alt=""> Letbane</label>
+            <input type="radio" class="btn-check" name="boardmode" id="modeDkBus" value="5" autocomplete="off">
+            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkBus"><img src="/ibus.webp" class="me-2" alt=""> DK Bus</label>
           </div>
         </div>
 
@@ -220,6 +222,14 @@
           <label class="form-label mt-2" for="letbaneId">Rejseplanen Stop ID</label>
           <input id="letbaneId" type="text" maxlength="7" placeholder="e.g. 8608704" class="form-control">
           <div class="form-text">Either direction's stop ID shows the full combined board for that stop (both directions).</div>
+        </div>
+
+        <div class="mb-3" id="dkBusSearchBox" style="display:none">
+          <label class="form-label" for="dkBusName">Bus Stop Name</label>
+          <input id="dkBusName" type="text" placeholder="A friendly name to show on screen" class="form-control">
+          <label class="form-label mt-2" for="dkBusId">Rejseplanen Stop ID</label>
+          <input id="dkBusId" type="text" maxlength="7" placeholder="e.g. 8600512" class="form-control">
+          <div class="form-text">Can be the same stop ID as DK Tog above - buses and trains at a shared hub both use the same underlying stop ID, just filtered differently.</div>
         </div>
 
         <div id="dkInvalidToken" style="display:none;">
@@ -864,6 +874,10 @@
       letbaneId: "",
       letbaneLat: 0,
       letbaneLon: 0,
+      dkBusName: "",
+      dkBusId: "",
+      dkBusLat: 0,
+      dkBusLon: 0,
       dataSource: 0,
       firmwareVersion: "",
       prevFirmwareVersion: "",
@@ -920,7 +934,9 @@
       dkCallingStation: document.getElementById('dkCallingStation'),
       dkCallingStopId: document.getElementById('dkCallingStopId'),
       letbaneName: document.getElementById('letbaneName'),
-      letbaneId: document.getElementById('letbaneId')
+      letbaneId: document.getElementById('letbaneId'),
+      dkBusName: document.getElementById('dkBusName'),
+      dkBusId: document.getElementById('dkBusId')
     };
 
     document.getElementById('formsettings').addEventListener('keydown', function(e) { if (e.key === 'Enter') e.preventDefault(); });
@@ -1644,6 +1660,7 @@
       const bus = (mode === 2);
       const dkrail = (mode === 3 && appState.validRejseplanenKey);
       const letbane = (mode === 4 && appState.validRejseplanenKey);
+      const dkbus = (mode === 5 && appState.validRejseplanenKey);
 
       show("nrT", rail);
       show("nrSearchBox", rail);
@@ -1659,7 +1676,7 @@
       show("optShowFullMsgs", rail || tube || dkrail);
       show("optShowClockNoServices", rail);
       show("optFastRefresh", rail);
-      show("optNoScroll", rail || tube || dkrail || letbane);
+      show("optNoScroll", rail || tube || dkrail || letbane || dkbus);
       show("optRssFeed", rail || tube || dkrail || letbane);
       show("optDataSource", rail);
       show("optNrTimeOffset", rail);
@@ -1684,14 +1701,16 @@
 
       show("dkSearchBox", dkrail);
       show("letbaneSearchBox", letbane);
-      show("dkInvalidToken", (mode === 3 || mode === 4) && !appState.validRejseplanenKey);
+      show("dkBusSearchBox", dkbus);
+      show("dkInvalidToken", (mode === 3 || mode === 4 || mode === 5) && !appState.validRejseplanenKey);
 
       if (
         (rail && appState.stationName) ||
         (tube && appState.tubeName) ||
         (bus && appState.busIdOK) ||
         (dkrail && appState.dkCrs) ||
-        (letbane && appState.letbaneId)
+        (letbane && appState.letbaneId) ||
+        (dkbus && appState.dkBusId)
       ) {
         enableSave(true);
       } else {
@@ -1708,6 +1727,7 @@
       document.getElementById("modeBus").checked = (mode === 2);
       document.getElementById("modeDkRail").checked = (mode === 3);
       document.getElementById("modeLetbane").checked = (mode === 4);
+      document.getElementById("modeDkBus").checked = (mode === 5);
     }
 
     function validateAtcoFormat() {
@@ -1732,6 +1752,8 @@
     elements.dkCallingStopId.addEventListener('input', function () { appState.dkCallingStopId = this.value.trim(); });
     elements.letbaneName.addEventListener('input', function () { appState.letbaneName = this.value.trim(); });
     elements.letbaneId.addEventListener('input', function () { appState.letbaneId = this.value.trim(); applyBoardMode(); });
+    elements.dkBusName.addEventListener('input', function () { appState.dkBusName = this.value.trim(); });
+    elements.dkBusId.addEventListener('input', function () { appState.dkBusId = this.value.trim(); applyBoardMode(); });
 
     function getCurrentLocationConfig() {
         let config = {
@@ -1780,12 +1802,19 @@
             config.dkLat = 0;
             config.dkLon = 0;
             config.filter = appState.dkCallingStation ? `Til: ${appState.dkCallingStation}` : "";
-        } else { // Letbane
+        } else if (appState.boardMode === 4) { // Letbane
             config.name = appState.letbaneName || appState.letbaneId;
             config.letbaneName = config.name;
             config.letbaneId = appState.letbaneId;
             config.letbaneLat = 0;
             config.letbaneLon = 0;
+            config.filter = "";
+        } else { // DK Bus
+            config.name = appState.dkBusName || appState.dkBusId;
+            config.dkBusName = config.name;
+            config.dkBusId = appState.dkBusId;
+            config.dkBusLat = 0;
+            config.dkBusLon = 0;
             config.filter = "";
         }
         return config;
@@ -1801,6 +1830,7 @@
             if (mode === 2) return '<img src="/ibus.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             if (mode === 3) return '<img src="/irail.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             if (mode === 4) return '<img src="/itube.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
+            if (mode === 5) return '<img src="/ibus.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             return '';
         };
 
@@ -1894,6 +1924,8 @@
       appState.dkProducts = s.dkProducts ?? 31;
       appState.letbaneName = s.letbaneName || "";
       appState.letbaneId = s.letbaneId || "";
+      appState.dkBusName = s.dkBusName || "";
+      appState.dkBusId = s.dkBusId || "";
 
       appState.boardMode = s.mode ?? (s.tube != undefined ? (s.tube ? 1 : 0) : 0);
       delete s.tube;
@@ -1925,6 +1957,8 @@
       elements.form.querySelector('#dkProductStog').checked = !!(appState.dkProducts & 16);
       elements.letbaneName.value = appState.letbaneName;
       elements.letbaneId.value = appState.letbaneId;
+      elements.dkBusName.value = appState.dkBusName;
+      elements.dkBusId.value = appState.dkBusId;
       elements.brightness.value = s.brightness ?? 50;
       const pct = (elements.brightness.value / 255) * 100;
       elements.brightness.title = Math.round(pct) + "%";
@@ -2184,6 +2218,12 @@
         s.letbaneId = appState.letbaneId;
         s.letbaneLat = 0;
         s.letbaneLon = 0;
+      }
+      if (appState.dkBusId) {
+        s.dkBusName = appState.dkBusName || appState.dkBusId;
+        s.dkBusId = appState.dkBusId;
+        s.dkBusLat = 0;
+        s.dkBusLon = 0;
       }
       if (isChecked("optTZ") && elements.customTZ.value.trim().length) s.TZ = elements.customTZ.value.trim(); else delete s.TZ;
       if (isChecked("optHost") && elements.customHost.value.trim().length) s.hostname = elements.customHost.value.trim(); else delete s.hostname;

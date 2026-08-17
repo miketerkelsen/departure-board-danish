@@ -310,6 +310,7 @@ static const char btAttribution[] = "Powered by bustimes.org";
 static const char dkAttribution[] = "Data fra Rejseplanen";
 
 #define LETBANE_PRODUCTS 2048          // Rejseplanen product bitmask: bit 11 (Letbane)
+#define DKBUS_PRODUCTS 32              // Rejseplanen product bitmask: bit 5 (Bus)
 
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
 #define DATAUPDATEINTERVAL 90000      // How often we fetch data from National Rail (ms - 1.5 mins) - "default" option
@@ -422,6 +423,7 @@ static bool tubeIsSet = false;
 static bool busIsSet = false;
 static bool dkRailIsSet = false;
 static bool letbaneIsSet = false;
+static bool dkBusIsSet = false;
 static bool schedulerActive = false;
 static bool carouselActive = false;
 static int activeSlotEventTime;
@@ -449,7 +451,8 @@ enum boardModes {
   MODE_TUBE = 1,
   MODE_BUS = 2,
   MODE_DKRAIL = 3,
-  MODE_LETBANE = 4
+  MODE_LETBANE = 4,
+  MODE_DKBUS = 5
 };
 boardModes boardMode = MODE_RAIL;
 
@@ -613,7 +616,7 @@ void drawStartupHeading() {
 void drawStationHeader(const char *stopName, const char *callingStopName, const char *platFilter, const int timeOffset) {
 
   // Clear the top line
-  if (boardMode == MODE_TUBE || boardMode == MODE_BUS || boardMode == MODE_LETBANE) {
+  if (boardMode == MODE_TUBE || boardMode == MODE_BUS || boardMode == MODE_LETBANE || boardMode == MODE_DKBUS) {
     blankArea(0,ULINE0,256,ULINE1-1);
   } else {
     blankArea(0,LINE0,256,LINE1-1);
@@ -869,6 +872,9 @@ void showNoDataScreen() {
     case MODE_LETBANE:
       strcpy(msg,"No data available for the selected letbane stop.");
       break;
+    case MODE_DKBUS:
+      sprintf(msg,"No data available for stop id \"%s\".",locationCode);
+      break;
   }
   centreText(msg,-1);
   u8g2.setFont(NatRailSmall9);
@@ -937,6 +943,7 @@ void showTokenErrorScreen() {
       break;
     case MODE_DKRAIL:
     case MODE_LETBANE:
+    case MODE_DKBUS:
       centreText("Access to the Rejseplanen database denied.",-1);
       break;
   }
@@ -965,6 +972,7 @@ void showCRSErrorScreen() {
       break;
     case MODE_DKRAIL:
     case MODE_LETBANE:
+    case MODE_DKBUS:
       sprintf(msg,"The Rejseplanen stop id \"%s\" is not valid.",locationCode);
       break;
   }
@@ -1184,6 +1192,7 @@ void resetLocationIds() {
   busIsSet = false;
   dkRailIsSet = false;
   letbaneIsSet = false;
+  dkBusIsSet = false;
 }
 
 void saveFirmwareInfo() {
@@ -1216,36 +1225,49 @@ int getTimeInMinutes() {
 
 void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
   if (requestedMode == MODE_NEXTMODE) {
+    // Circular order: RAIL -> TUBE -> BUS -> DKRAIL -> LETBANE -> DKBUS -> (back to RAIL)
     switch (boardMode) {
       case MODE_RAIL:
         if (tubeIsSet) boardMode = MODE_TUBE;
         else if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         break;
       case MODE_TUBE:
         if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         else if (railIsSet) boardMode = MODE_RAIL;
         break;
       case MODE_BUS:
         if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         else if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         break;
       case MODE_DKRAIL:
         if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         else if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         else if (busIsSet) boardMode = MODE_BUS;
         break;
       case MODE_LETBANE:
+        if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (railIsSet) boardMode = MODE_RAIL;
+        else if (tubeIsSet) boardMode = MODE_TUBE;
+        else if (busIsSet) boardMode = MODE_BUS;
+        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        break;
+      case MODE_DKBUS:
         if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         else if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        else if (letbaneIsSet) boardMode = MODE_LETBANE;
         break;
     }
   } else {
@@ -1324,6 +1346,19 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
       }
       break;
 
+    case MODE_DKBUS:
+      if (slot["dkBusId"].is<const char*>())  strlcpy(locationCode, slot["dkBusId"], sizeof(locationCode));
+      if (isDefault) {
+        if (slot["dkBusName"].is<const char*>()) strlcpy(locationName, slot["dkBusName"], sizeof(locationName));
+        if (slot["dkBusLat"].is<float>())         locationLat = slot["dkBusLat"];
+        if (slot["dkBusLon"].is<float>())         locationLon = slot["dkBusLon"];
+      } else {
+        if (slot["name"].is<const char*>()) strlcpy(locationName, slot["name"], sizeof(locationName));
+        if (slot["lat"].is<float>())          locationLat = slot["lat"];
+        if (slot["lon"].is<float>())          locationLon = slot["lon"];
+      }
+      break;
+
   }
 }
 
@@ -1355,6 +1390,7 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["busId"].is<const char*>() && strlen(settings["busId"])) busIsSet = true; else busIsSet = false;
         if (settings["dkCrs"].is<const char*>() && strlen(settings["dkCrs"])) dkRailIsSet = true; else dkRailIsSet = false;
         if (settings["letbaneId"].is<const char*>() && strlen(settings["letbaneId"])) letbaneIsSet = true; else letbaneIsSet = false;
+        if (settings["dkBusId"].is<const char*>() && strlen(settings["dkBusId"])) dkBusIsSet = true; else dkBusIsSet = false;
 
         if (settings["hostname"].is<const char*>())   strlcpy(hostname, settings["hostname"], sizeof(hostname));
         if (settings["wsdlHost"].is<const char*>())   strlcpy(wsdlHost, settings["wsdlHost"], sizeof(wsdlHost));
@@ -1608,7 +1644,7 @@ void softResetBoard(boardModes requestedMode) {
       progressBar("Updating RSS headlines feed",50);
       updateRssFeed();
     }
-  } else if (rssEnabled && previousMode != boardMode && boardMode != MODE_BUS) {
+  } else if (rssEnabled && previousMode != boardMode && boardMode != MODE_BUS && boardMode != MODE_DKBUS) {
     buildRssMessage();
   }
 
@@ -1649,6 +1685,11 @@ void softResetBoard(boardModes requestedMode) {
       checkWeatherUpdate(prevLat,prevLon);
       progressBar("Initialising Letbane interface",70);
       break;
+
+    case MODE_DKBUS:
+      checkWeatherUpdate(prevLat,prevLon);
+      progressBar("Initialising Rejseplanen Bus interface",70);
+      break;
   }
   station.numServices=0;
   messages.numMessages=0;
@@ -1669,7 +1710,7 @@ void switchToNextMode() {
     softResetBoard(MODE_LOADCONFIG);
   }
   else if (schedulerActive) softResetBoard(MODE_NEXTSCHEDULE);
-  else if (railIsSet+tubeIsSet+busIsSet+dkRailIsSet+letbaneIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
+  else if (railIsSet+tubeIsSet+busIsSet+dkRailIsSet+letbaneIsSet+dkBusIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
 }
 
 // WiFiManager callback, entered config mode
@@ -2208,8 +2249,12 @@ void drawBusService(int serviceId, int y, int destPos) {
     u8g2.drawStr(0,y-1,station.service[serviceId].via);
     int etdWidth = 25;
     if (isDigit(station.service[serviceId].etd[0])) {
-      sprintf(etd,"Exp %s",station.service[serviceId].etd);
+      sprintf(etd,boardMode==MODE_DKBUS?"Forventet %s":"Exp %s",station.service[serviceId].etd);
       etdWidth = 47;
+    } else if (boardMode==MODE_DKBUS && station.service[serviceId].etd[0]) {
+      // "Aflyst"/"Rettidig" - show the Danish status word rather than falling back to sTime
+      strcpy(etd,station.service[serviceId].etd);
+      etdWidth = getStringWidth(etd)+6;
     } else strcpy(etd,station.service[serviceId].sTime);
     u8g2.drawStr(SCREEN_WIDTH - etdWidth,y-1,etd);
 
@@ -2263,14 +2308,15 @@ void drawBusDeparturesBoard() {
       if (station.numServices>1) drawBusService(1,ULINE2,busDestX);
     } else {
       u8g2.setFont(NatRailSmall9);
-      centreText("There are no scheduled services at this stop.",ULINE1-1);
+      centreText(boardMode==MODE_DKBUS?"Der er ingen planlagte afgange fra dette stoppested.":"There are no scheduled services at this stop.",ULINE1-1);
     }
   }
   u8g2.sendBuffer();
 }
 
 void updateBusDepartures() {
-  busdata.loadDepartures(&station);
+  if (boardMode == MODE_DKBUS) rejseplanenData.loadDepartures(&station,&messages);
+  else busdata.loadDepartures(&station);
   lastDataLoadTime = millis();
   noDataLoaded = false;
   dataLoadSuccess++;
@@ -2282,12 +2328,13 @@ void updateBusDepartures() {
     busDestX = (busDestX > svcWidth) ? busDestX : svcWidth;
   }
   busDestX+=5;
+  const char *attribution = (boardMode == MODE_DKBUS) ? "Data fra Rejseplanen" : btAttribution;
   if (weatherEnabled && weatherMsg[0]) {
     strcpy(line2[0],weatherMsg);
-    strcpy(line2[1],btAttribution);
+    strcpy(line2[1],attribution);
     messages.numMessages=2;
   } else{
-    strcpy(line2[0],btAttribution);
+    strcpy(line2[0],attribution);
     messages.numMessages=1;
   }
 }
@@ -2533,6 +2580,7 @@ void handleInfo(AsyncWebServerRequest *request) {
 
     case MODE_DKRAIL:
     case MODE_LETBANE:
+    case MODE_DKBUS:
       message+=String(jsonKeyBuffer.lastResultMessage);
       break;
   }
@@ -2540,7 +2588,7 @@ void handleInfo(AsyncWebServerRequest *request) {
   message+=getResultCodeText(lastUpdateResult);
   message+="\nServices: " + String(station.numServices) + "\nMessages: ";
   int nMsgs = messages.numMessages;
-  if (boardMode == MODE_TUBE || boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE) nMsgs--;
+  if (boardMode == MODE_TUBE || boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_DKBUS) nMsgs--;
   message+=String(nMsgs) + "\n";
 
   if (rssEnabled) {
@@ -3243,6 +3291,10 @@ void fetchDeparturesTask(void *pvParameters) {
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,LETBANE_PRODUCTS,false,"",0);
             nextDataUpdate = millis()+apiRefreshRate;
             break;
+          case MODE_DKBUS:
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,DKBUS_PRODUCTS,false,"",0);
+            nextDataUpdate = millis() + BUSDATAUPDATEINTERVAL;
+            break;
         }
         fetchComplete = true;
         break;
@@ -3373,7 +3425,7 @@ void setup(void) {
       delete body; // Clean up memory
       request->_tempObject = nullptr;
 
-      if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet) || request->hasParam("reboot")) {
+      if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet) || request->hasParam("reboot")) {
         // First time setup or base config change, we need a full reboot
         sendResponse(200,"Configuration saved. The Departures Board will now restart.",request);
         restartTimer.once(1, []() { ESP.restart(); });
@@ -3429,7 +3481,7 @@ void setup(void) {
         // Load/Update the API Keys in memory
         loadApiKeys();
         // If all location codes are blank we're in the setup process. If not, the keys have been changed so just reboot.
-        if (!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet) {
+        if (!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet) {
           sendResponse(200,msg,request);
           writeDefaultConfig();
           showSetupCrsHelpScreen();
@@ -3558,7 +3610,7 @@ void setup(void) {
   }
   checkPostWebUpgrade();
   // First time configuration?
-  if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet) || (!nrToken[0] && rdmDeparturesApiKey=="" && boardMode==MODE_RAIL) || (!rejseplanenKey[0] && (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE))) {
+  if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet) || (!nrToken[0] && rdmDeparturesApiKey=="" && boardMode==MODE_RAIL) || (!rejseplanenKey[0] && (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS))) {
     if (!apiKeys) showSetupKeysHelpScreen();
     else showSetupCrsHelpScreen();
     // First time setup mode will exit with a reboot, so just loop here forever
@@ -3598,7 +3650,7 @@ void setup(void) {
   loadConfig();
 
   station.numServices=0;
-  if (rssEnabled && boardMode!=MODE_BUS) {
+  if (rssEnabled && boardMode!=MODE_BUS && boardMode!=MODE_DKBUS) {
     progressBar("Loading RSS headlines feed",60);
     updateRssFeed();
   }
@@ -3639,6 +3691,15 @@ void setup(void) {
       progressBar("Initialising BusTimes interface",70);
       // Create a cleaned filter
       busdata.cleanFilter(locationFilter,locationCleanFilter,sizeof(locationFilter));
+      startupProgressPercent=70;
+  } else if (boardMode == MODE_DKRAIL) {
+      progressBar("Initialising Rejseplanen interface",70);
+      startupProgressPercent=70;
+  } else if (boardMode == MODE_LETBANE) {
+      progressBar("Initialising Letbane interface",70);
+      startupProgressPercent=70;
+  } else if (boardMode == MODE_DKBUS) {
+      progressBar("Initialising Rejseplanen Bus interface",70);
       startupProgressPercent=70;
   }
 }
@@ -3733,11 +3794,15 @@ void loop(void) {
     case MODE_LETBANE:
       undergroundArrivalsLoop();
       break;
+
+    case MODE_DKBUS:
+      busDeparturesLoop();
+      break;
   }
 
   if (manualUpdateCheck && !fetchInProgress) doManualOtaCheck();
 
-  if (rssEnabled && boardMode != MODE_BUS && millis() > nextRssUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+  if (rssEnabled && boardMode != MODE_BUS && boardMode != MODE_DKBUS && millis() > nextRssUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
     // Start an RSS Update on Core 0
     fetchMode = FETCH_RSS;
     fetchInProgress = true;
