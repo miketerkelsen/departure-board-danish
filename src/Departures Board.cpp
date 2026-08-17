@@ -2996,7 +2996,12 @@ void departureBoardLoop() {
       prevService = line3Service;
       line3Service++;
       if (station.numServices) {
-        if ((line3Service>station.numServices && !weatherMsg[0]) || (line3Service>station.numServices+1 && weatherMsg[0])) line3Service=(noScrolling && station.numServices>1) ? 2:1;  // First 'other' service
+        // How many "extra" info slots exist beyond the departure list itself: weather (if enabled)
+        // and the mandatory attribution (not shown on DK Rail - see drawServiceLine). Sizing the
+        // rollover to the actual slot count (rather than assuming attribution always exists) avoids
+        // cycling through a dead blank slot when neither is present.
+        int extraSlots = (weatherMsg[0]?1:0) + (boardMode!=MODE_DKRAIL?1:0);
+        if (line3Service>station.numServices+extraSlots) line3Service=(noScrolling && station.numServices>1) ? 2:1;  // First 'other' service
       } else {
         if (weatherMsg[0] && line3Service>1) line3Service=0;
       }
