@@ -396,10 +396,6 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
     }
 
-    // Add the mandatory attribution message (mirrors TfLdataClient's pattern - the letbane
-    // board has no other spot to show it; harmless extra rotation item on the DK rail board).
-    if (xMessages->numMessages < MAXBOARDMESSAGES) strlcpy(xMessages->messages[xMessages->numMessages++],"Data fra Rejseplanen",sizeof(xMessages->messages[0]));
-
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
     sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"[RP] OK: D:%d T:%d S:%d %s",dataReceived,millis()-perfTimer,uxHighWaterMark,bChunked?"C!":"");
     return UPD_SUCCESS;

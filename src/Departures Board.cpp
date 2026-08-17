@@ -307,12 +307,11 @@ static const uint8_t UndergroundClock8[150] U8G2_FONT_SECTION("UndergroundClock8
 static const char nrAttributionn[] = "Powered by National Rail Enquiries";
 static const char rdgAttribution[] = "Powered by Rail Delivery Group";
 static const char btAttribution[] = "Powered by bustimes.org";
-static const char dkAttribution[] = "Data fra Rejseplanen";
 
 // Danish weekday/month names - strftime()'s %a/%b/%B always come out in English on this platform
 // (the ESP32 Arduino/newlib build has no da_DK locale data compiled in, so setlocale() can't help
 // here), so these are built by hand and substituted in for Danish modes instead.
-static const char* const dkWeekdayShort[7] = {"S\xF8n","Man","Tir","Ons","Tor","Fre","L\xF8r"}; // tm_wday: 0=Sunday. \xF8 = Latin-1 ø (setHeaderFont() switches to a stock font with this glyph for Danish modes)
+static const char* const dkWeekdayShort[7] = {"S\xF8n","Man","Tir","Ons","Tor","Fre","L\xF8r"}; // tm_wday: 0=Sunday. \xF8 = Latin-1 ø (drawn via drawMixedStr/getMixedStringWidth so only the ø glyph borrows a stock font)
 static const char* const dkMonthShort[12] = {"Jan","Feb","Mar","Apr","Maj","Jun","Jul","Aug","Sep","Okt","Nov","Dec"};
 static const char* const dkMonthLong[12] = {"januar","februar","marts","april","maj","juni","juli","august","september","oktober","november","december"};
 
@@ -560,30 +559,64 @@ int getStringWidth(const char *message) {
   return u8g2.getStrWidth(message);
 }
 
-// The custom hand-built pixel fonts (NatRailSmall9/NatRailTall12/Underground10) only cover
-// ASCII, so Danish station/destination names would render with missing glyphs. Rather than
-// hand-drawing new glyphs into those compiled binary font blobs (no source file to regenerate
-// them from, and no way to preview a hand-built bitmap here), Danish modes instead use one of
-// U8g2's own stock fonts - the "_tf" ("transparent, full") variants ship the complete ISO 8859-1
-// Latin-1 glyph set, which includes æ/ø/å/Æ/Ø/Å at single-byte codepoints 0xE6/0xF8/0xE5/0xC6/
-// 0xD8/0xC5. Latin-1 (0-255) glyph lookup works regardless of the -DU8G2_WITHOUT_UNICODE build
-// flag - that flag only disables the *multi-byte* UTF-8 decoding path for codepoints above 255,
-// so no other build changes are needed. rejseplanenClient converts incoming UTF-8 into these
-// same single-byte codepoints (see convertDanishToLatin1()) so the strings match up.
+// The custom hand-built pixel fonts (NatRailSmall9/NatRailTall12/Underground10) only cover ASCII,
+// so Danish station/destination names need glyphs for æ/ø/å/Æ/Ø/Å (Latin-1 0xE6/0xF8/0xE5/0xC6/
+// 0xD8/0xC5) that don't exist in them. There's no source file to regenerate those custom fonts
+// from, and no way to preview a hand-drawn glyph here, so rather than swap the whole typeface
+// (which looked/felt wrong, and also meant every blankArea() height sized for the original font
+// no longer matched, leaving ghost pixel rows behind on redraw), these two helpers instead draw
+// using the CURRENT/ORIGINAL font throughout, and only borrow the accented letter's glyph from a
+// same-height stock U8g2 "_tf" font (which does have full Latin-1 coverage) for that one
+// character, switching straight back afterwards. Text with no accented characters (i.e. all UK
+// content) draws identically to plain drawStr()/getStrWidth() - this is a no-op passthrough.
+static bool isDanishAccentByte(unsigned char c) {
+  return c==0xE6 || c==0xF8 || c==0xE5 || c==0xC6 || c==0xD8 || c==0xC5; // æ ø å Æ Ø Å
+}
+
+int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
+  const uint8_t *baseFont = u8g2.getU8g2()->font;
+  int cursorX = x;
+  char buf[2] = {0,0};
+  for (const char *p = text; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    buf[0] = (char)c;
+    bool isAccent = isDanishAccentByte(c);
+    if (isAccent) u8g2.setFont(accentFont);
+    cursorX += u8g2.drawStr(cursorX, y, buf);
+    if (isAccent) u8g2.setFont(baseFont);
+  }
+  return cursorX - x;
+}
+
+int getMixedStringWidth(const char *text, const uint8_t *accentFont) {
+  const uint8_t *baseFont = u8g2.getU8g2()->font;
+  int width = 0;
+  char buf[2] = {0,0};
+  for (const char *p = text; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    buf[0] = (char)c;
+    bool isAccent = isDanishAccentByte(c);
+    if (isAccent) u8g2.setFont(accentFont);
+    width += u8g2.getStrWidth(buf);
+    if (isAccent) u8g2.setFont(baseFont);
+  }
+  return width;
+}
+
+// Danish modes are always drawn in the original custom fonts now - only the accented letters get
+// substituted, via drawMixedStr()/getMixedStringWidth() at the specific call sites that render
+// free-text station/destination/calling names (never the fixed UI labels, ordinals or times).
 void setSmallFont() {
-  u8g2.setFont((boardMode==MODE_DKRAIL || boardMode==MODE_DKBUS) ? u8g2_font_6x10_tf : NatRailSmall9);
+  u8g2.setFont(NatRailSmall9);
 }
 void setTallFont() {
-  u8g2.setFont((boardMode==MODE_DKRAIL) ? u8g2_font_6x12_tf : NatRailTall12);
+  u8g2.setFont(NatRailTall12);
 }
 void setTubeFont() {
-  u8g2.setFont((boardMode==MODE_LETBANE) ? u8g2_font_6x10_tf : Underground10);
+  u8g2.setFont(Underground10);
 }
-// The station header title (drawStationHeader) is always drawn in NatRailSmall9 regardless of
-// mode - unlike setSmallFont()/setTubeFont() this needs to catch all three Danish modes, since
-// Letbane's own body text uses setTubeFont() but still shares this same header function.
 void setHeaderFont() {
-  u8g2.setFont((boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS) ? u8g2_font_6x10_tf : NatRailSmall9);
+  u8g2.setFont(NatRailSmall9);
 }
 
 void drawTruncatedText(const char *message, int line, int x) {
@@ -596,10 +629,37 @@ void drawTruncatedText(const char *message, int line, int x) {
   u8g2.drawStr(x,line,buff);
 }
 
+void drawTruncatedMixedText(const char *message, int line, int x, const uint8_t *accentFont) {
+  char buff[strlen(message)+4];
+  int maxWidth = SCREEN_WIDTH - 6 - x;
+  strcpy(buff,message);
+  int i = strlen(buff);
+  while (getMixedStringWidth(buff,accentFont)>maxWidth && i) buff[i--] = '\0';
+  strcat(buff,"...");
+  drawMixedStr(x,line,buff,accentFont);
+}
+
 void centreText(const char *message, int line, int margin=0, int maxWidth = SCREEN_WIDTH) {
   int width = u8g2.getStrWidth(message);
   if (width<=maxWidth) u8g2.drawStr(((maxWidth-width)/2)+margin,line,message);
   else drawTruncatedText(message,line,0);
+}
+
+// Same as centreText(), but for messages that may contain Danish accented characters (the
+// "Stopper ved"/calling-points list, origin-service messages) - substitutes those specific
+// glyphs from accentFont via drawMixedStr()/getMixedStringWidth() rather than the whole message.
+void centreMixedText(const char *message, int line, const uint8_t *accentFont, int margin=0, int maxWidth = SCREEN_WIDTH) {
+  int width = getMixedStringWidth(message,accentFont);
+  if (width<=maxWidth) drawMixedStr(((maxWidth-width)/2)+margin,line,message,accentFont);
+  else {
+    char buff[strlen(message)+4];
+    int truncMaxWidth = SCREEN_WIDTH - 6;
+    strcpy(buff,message);
+    int i = strlen(buff);
+    while (getMixedStringWidth(buff,accentFont)>truncMaxWidth && i) buff[i--] = '\0';
+    strcat(buff,"...");
+    drawMixedStr(0,line,buff,accentFont);
+  }
 }
 
 void drawProgressBar(int percent) {
@@ -679,7 +739,8 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
 
   int titleOffset = 0;
   if (schedulerActive || carouselActive) titleOffset = 13;
-  int boardTitleWidth = getStringWidth(boardTitle);
+  const uint8_t *accentFont = u8g2_font_5x8_tf; // matches setHeaderFont()'s NatRailSmall9
+  int boardTitleWidth = getMixedStringWidth(boardTitle,accentFont);
 
   if (dateEnabled) {
     int const dateY=55;
@@ -690,25 +751,25 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
     } else {
       strftime(sysTime,29,"%a %d %b",&timeinfo);
     }
-    dateWidth = getStringWidth(sysTime);
+    dateWidth = getMixedStringWidth(sysTime,accentFont);
     dateDay = timeinfo.tm_mday;
     if (callingStopName[0] || boardTitleWidth+dateWidth+10+titleOffset>=SCREEN_WIDTH) {
       blankArea(SCREEN_WIDTH-70,dateY,70,SCREEN_HEIGHT-dateY);
-      u8g2.drawStr(SCREEN_WIDTH-dateWidth,dateY-1,sysTime); // Date bottom right
-      if (boardTitleWidth+titleOffset < SCREEN_WIDTH) centreText(boardTitle,LINE0-1);
-      else drawTruncatedText(boardTitle,LINE0-1,titleOffset);
+      drawMixedStr(SCREEN_WIDTH-dateWidth,dateY-1,sysTime,accentFont); // Date bottom right
+      if (boardTitleWidth+titleOffset < SCREEN_WIDTH) centreMixedText(boardTitle,LINE0-1,accentFont);
+      else drawTruncatedMixedText(boardTitle,LINE0-1,titleOffset,accentFont);
     } else {
-      u8g2.drawStr(SCREEN_WIDTH-dateWidth,LINE0-1,sysTime); // right-aligned date top
+      drawMixedStr(SCREEN_WIDTH-dateWidth,LINE0-1,sysTime,accentFont); // right-aligned date top
       if ((SCREEN_WIDTH-boardTitleWidth)/2 < dateWidth+8) {
         // station name left aligned
-        u8g2.drawStr(titleOffset,LINE0-1,boardTitle);
+        drawMixedStr(titleOffset,LINE0-1,boardTitle,accentFont);
       } else {
-        centreText(boardTitle,LINE0-1);
+        centreMixedText(boardTitle,LINE0-1,accentFont);
       }
     }
   } else {
-    if (boardTitleWidth+titleOffset < SCREEN_WIDTH) centreText(boardTitle,LINE0-1);
-    else drawTruncatedText(boardTitle,LINE0-1,titleOffset);
+    if (boardTitleWidth+titleOffset < SCREEN_WIDTH) centreMixedText(boardTitle,LINE0-1,accentFont);
+    else drawTruncatedMixedText(boardTitle,LINE0-1,titleOffset,accentFont);
   }
 
   if (titleOffset) u8g2.drawStr(0,LINE0-1,schedulerActive?"\x87":"\x88");
@@ -1865,15 +1926,15 @@ void drawPrimaryService(bool showVia) {
     strcpy(clipDestination,station.service[0].destination);
     if (station.service[0].serviceType == BUS) strcat(clipDestination," ~");  // Add bus icon to destination
   }
-  if (getStringWidth(clipDestination) > spaceAvailable) {
-    while (getStringWidth(clipDestination) > (spaceAvailable - 8)) {
+  if (getMixedStringWidth(clipDestination,u8g2_font_6x12_tf) > spaceAvailable) {
+    while (getMixedStringWidth(clipDestination,u8g2_font_6x12_tf) > (spaceAvailable - 8)) {
       clipDestination[strlen(clipDestination)-1] = '\0';
     }
     // check if there's a trailing space left
     if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
     strcat(clipDestination,"...");
   }
-  u8g2.drawStr(destPos,LINE1-1,clipDestination);
+  drawMixedStr(destPos,LINE1-1,clipDestination,u8g2_font_6x12_tf);
   // Set font back to standard
   setSmallFont();
 }
@@ -1927,22 +1988,23 @@ void drawServiceLine(int line, int y) {
     // work out if we need to clip the destination
     strcpy(clipDestination,station.service[line].destination);
     if (station.service[line].serviceType == BUS) strcat(clipDestination," \x86"); // Add bus icon
-    if (getStringWidth(clipDestination) > spaceAvailable) {
-      while (getStringWidth(clipDestination) > spaceAvailable - 5) {
+    if (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable) {
+      while (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable - 5) {
         clipDestination[strlen(clipDestination)-1] = '\0';
       }
       // check if there's a trailing space left
       if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
       strcat(clipDestination,"...");
     }
-    u8g2.drawStr(destPos,y-1,clipDestination);
+    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_5x8_tf);
   } else {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
       centreText(weatherMsg,y-1);
-    } else {
-      // We're showing the mandatory attribution
-      centreText(boardMode==MODE_DKRAIL?dkAttribution:(useRDMclient?rdgAttribution:nrAttributionn),y-1);
+    } else if (boardMode!=MODE_DKRAIL) {
+      // We're showing the mandatory attribution (not shown on the Danish rail board - no
+      // attribution requirement from Rejseplanen, and the user asked for it removed)
+      centreText(useRDMclient?rdgAttribution:nrAttributionn,y-1);
     }
   }
 }
@@ -2208,14 +2270,14 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
 
     if (isShowingCurrentLocation) sprintf(serviceData,"%d %s",serviceId+1,station.origin);
     else sprintf(serviceData,"%d %s",serviceId+1,station.service[serviceId].destination);
-    if (getStringWidth(serviceData) > SCREEN_WIDTH-usedSpace) {
-      while (getStringWidth(serviceData) > SCREEN_WIDTH-usedSpace-6) {
+    if (getMixedStringWidth(serviceData,u8g2_font_6x10_tf) > SCREEN_WIDTH-usedSpace) {
+      while (getMixedStringWidth(serviceData,u8g2_font_6x10_tf) > SCREEN_WIDTH-usedSpace-6) {
         serviceData[strlen(serviceData)-1] = '\0';
       }
       if (serviceData[strlen(serviceData)-1] == ' ') serviceData[strlen(serviceData)-1] = '\0'; // remove any trailing space
       strcat(serviceData,"\x81");
     }
-    u8g2.drawStr(0,y-1,serviceData);
+    drawMixedStr(0,y-1,serviceData,u8g2_font_6x10_tf);
   }
 }
 
@@ -2299,7 +2361,7 @@ void drawBusService(int serviceId, int y, int destPos) {
     setSmallFont();
     blankArea(0,y,256,9);
 
-    u8g2.drawStr(0,y-1,station.service[serviceId].via);
+    drawMixedStr(0,y-1,station.service[serviceId].via,u8g2_font_5x8_tf);
     int etdWidth = 25;
     if (isDigit(station.service[serviceId].etd[0])) {
       sprintf(etd,boardMode==MODE_DKBUS?"Forventet %s":"Exp %s",station.service[serviceId].etd);
@@ -2314,15 +2376,15 @@ void drawBusService(int serviceId, int y, int destPos) {
     // work out if we need to clip the destination
     strcpy(clipDestination,station.service[serviceId].destination);
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
-    if (getStringWidth(clipDestination) > spaceAvailable) {
-      while (getStringWidth(clipDestination) > spaceAvailable - 17) {
+    if (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable) {
+      while (getMixedStringWidth(clipDestination,u8g2_font_5x8_tf) > spaceAvailable - 17) {
         clipDestination[strlen(clipDestination)-1] = '\0';
       }
       // check if there's a trailing space left
       if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
       strcat(clipDestination,"...");
     }
-    u8g2.drawStr(destPos,y-1,clipDestination);
+    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_5x8_tf);
   }
 }
 
@@ -2381,13 +2443,21 @@ void updateBusDepartures() {
     busDestX = (busDestX > svcWidth) ? busDestX : svcWidth;
   }
   busDestX+=5;
-  const char *attribution = (boardMode == MODE_DKBUS) ? "Data fra Rejseplanen" : btAttribution;
-  if (weatherEnabled && weatherMsg[0]) {
+  // Rejseplanen has no attribution requirement (and the user asked for it removed), so DK Bus
+  // only ever shows the weather message, if any; bustimes.org's attribution is mandatory and stays.
+  if (boardMode == MODE_DKBUS) {
+    if (weatherEnabled && weatherMsg[0]) {
+      strcpy(line2[0],weatherMsg);
+      messages.numMessages=1;
+    } else {
+      messages.numMessages=0;
+    }
+  } else if (weatherEnabled && weatherMsg[0]) {
     strcpy(line2[0],weatherMsg);
-    strcpy(line2[1],attribution);
+    strcpy(line2[1],btAttribution);
     messages.numMessages=2;
   } else{
-    strcpy(line2[0],attribution);
+    strcpy(line2[0],btAttribution);
     messages.numMessages=1;
   }
 }
@@ -2894,7 +2964,7 @@ void departureBoardLoop() {
     if (currentMessage>=numMessages) currentMessage=0;
     scrollStopsXpos=msgMargin;
     scrollStopsYpos=10;
-    scrollStopsLength = getStringWidth(line2[currentMessage]);
+    scrollStopsLength = getMixedStringWidth(line2[currentMessage],u8g2_font_5x8_tf);
     isScrollingStops=true;
     if (isCallingMessage(line2[currentMessage])) isShowingCalling=true; else isShowingCalling=false;
   }
@@ -2936,17 +3006,17 @@ void departureBoardLoop() {
       // we're scrolling up the message initially
       // if the previous message didn't scroll then we need to scroll it up off the screen
       if (prevScrollStopsLength && prevScrollStopsLength<msgWidth) {
-        if (!isCallingMessage(line2[prevMessage])) centreText(line2[prevMessage],scrollStopsYpos+msgLine-12,msgMargin,msgWidth);
-        else u8g2.drawStr(msgMargin,scrollStopsYpos+msgLine-12,line2[prevMessage]); // Handle very short calling at lists
+        if (!isCallingMessage(line2[prevMessage])) centreMixedText(line2[prevMessage],scrollStopsYpos+msgLine-12,u8g2_font_5x8_tf,msgMargin,msgWidth);
+        else drawMixedStr(msgMargin,scrollStopsYpos+msgLine-12,line2[prevMessage],u8g2_font_5x8_tf); // Handle very short calling at lists
       }
-      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreText(line2[currentMessage],scrollStopsYpos+msgLine-2,msgMargin,msgWidth); // Centre text if it fits
-      else u8g2.drawStr(msgMargin,scrollStopsYpos+msgLine-2,line2[currentMessage]);
+      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreMixedText(line2[currentMessage],scrollStopsYpos+msgLine-2,u8g2_font_5x8_tf,msgMargin,msgWidth); // Centre text if it fits
+      else drawMixedStr(msgMargin,scrollStopsYpos+msgLine-2,line2[currentMessage],u8g2_font_5x8_tf);
       scrollStopsYpos--;
       if (scrollStopsYpos==0) timer=millis()+1500;
     } else {
       // we're scrolling left
-      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreText(line2[currentMessage],msgLine-1,msgMargin,msgWidth); // Centre text if it fits
-      else u8g2.drawStr(scrollStopsXpos,msgLine-1,line2[currentMessage]);
+      if (scrollStopsLength<msgWidth && !isCallingMessage(line2[currentMessage])) centreMixedText(line2[currentMessage],msgLine-1,u8g2_font_5x8_tf,msgMargin,msgWidth); // Centre text if it fits
+      else drawMixedStr(scrollStopsXpos,msgLine-1,line2[currentMessage],u8g2_font_5x8_tf);
       if (scrollStopsLength < msgWidth) {
         // we don't need to scroll this message, it fits so just set a longer timer
         timer=millis()+6000;
@@ -3065,8 +3135,9 @@ void undergroundArrivalsLoop() {
 
   // Scrolling the additional services
   if (millis()>serviceTimer && !isScrollingService && !isSleeping && !noDataLoaded && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
-    if (station.numServices<=2 && numMessages==1 && attributionScrolled) {
-      // There are no additional services to scroll in so static attribution.
+    if (station.numServices<=2 && numMessages<=1 && (numMessages==0 || attributionScrolled)) {
+      // Nothing (or just one already-scrolled message) to show, so hold static. (Letbane can now
+      // have zero messages, since the mandatory attribution was removed.)
       serviceTimer = millis() + 30000;
     } else {
       // Need to change to the next service or message if there is one
@@ -3090,7 +3161,7 @@ void undergroundArrivalsLoop() {
             currentMessage=0;
           }
         }
-        scrollStopsLength = getStringWidth(line2[currentMessage]);
+        scrollStopsLength = getMixedStringWidth(line2[currentMessage],u8g2_font_6x10_tf);
       } else {
         scrollStopsLength=SCREEN_WIDTH;
       }
@@ -3107,14 +3178,14 @@ void undergroundArrivalsLoop() {
         drawUndergroundService(prevService,scrollServiceYpos+ULINE3-13);
       } else {
         // if the previous message didn't scroll then we need to scroll it up off the screen
-        if (prevScrollStopsLength && prevScrollStopsLength<256) centreText(line2[prevMessage],scrollServiceYpos+ULINE3-13);
+        if (prevScrollStopsLength && prevScrollStopsLength<256) centreMixedText(line2[prevMessage],scrollServiceYpos+ULINE3-13,u8g2_font_6x10_tf);
       }
       // Is this entry a service?
       if (line3Service<station.numServices) {
         drawUndergroundService(line3Service,scrollServiceYpos+ULINE3-1);
       } else {
-        if (scrollStopsLength<256) centreText(line2[currentMessage],scrollServiceYpos+ULINE3-2); // Centre text if it fits
-        else u8g2.drawStr(0,scrollServiceYpos+ULINE3-2,line2[currentMessage]);
+        if (scrollStopsLength<256) centreMixedText(line2[currentMessage],scrollServiceYpos+ULINE3-2,u8g2_font_6x10_tf); // Centre text if it fits
+        else drawMixedStr(0,scrollServiceYpos+ULINE3-2,line2[currentMessage],u8g2_font_6x10_tf);
       }
       u8g2.setMaxClipWindow();
       scrollServiceYpos--;
@@ -3128,8 +3199,8 @@ void undergroundArrivalsLoop() {
       }
     } else {
       // we're scrolling left
-      if (scrollStopsLength<256) centreText(line2[currentMessage],ULINE3-1); // Centre text if it fits
-      else u8g2.drawStr(scrollStopsXpos,ULINE3-1,line2[currentMessage]);
+      if (scrollStopsLength<256) centreMixedText(line2[currentMessage],ULINE3-1,u8g2_font_6x10_tf); // Centre text if it fits
+      else drawMixedStr(scrollStopsXpos,ULINE3-1,line2[currentMessage],u8g2_font_6x10_tf);
       if (scrollStopsLength < 256) {
         // we don't need to scroll this message, it fits so just set a longer timer
         serviceTimer=millis()+3000;
@@ -3226,8 +3297,9 @@ void busDeparturesLoop() {
   // Scrolling the additional services
   if (millis()>serviceTimer && !isScrollingPrimary && !isScrollingService && !isSleeping && !noDataLoaded && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
     // Need to change to the next service if there is one
-    if (station.numServices<=2 && messages.numMessages==1) {
-      // There are no additional services or weather to scroll in so static attribution.
+    if (station.numServices<=2 && messages.numMessages<=1) {
+      // There's nothing (or just one message) to scroll in, so hold static. (<=1, not ==1,
+      // since DK Bus can have zero messages now that the mandatory attribution was removed.)
       serviceTimer = millis() + 10000;
       line3Service=station.numServices;
     } else {
@@ -3263,13 +3335,13 @@ void busDeparturesLoop() {
         drawBusService(prevService,scrollServiceYpos+ULINE3-13,busDestX);
       } else {
         // Scrolling up the previous message
-        centreText(line2[prevMessage],scrollServiceYpos+ULINE3-13);
+        centreMixedText(line2[prevMessage],scrollServiceYpos+ULINE3-13,u8g2_font_5x8_tf);
       }
       // Is this entry a service?
       if (line3Service<station.numServices) {
         drawBusService(line3Service,scrollServiceYpos+ULINE3-1,busDestX);
       } else {
-        centreText(line2[currentMessage],scrollServiceYpos+ULINE3-2);
+        centreMixedText(line2[currentMessage],scrollServiceYpos+ULINE3-2,u8g2_font_5x8_tf);
       }
       u8g2.setMaxClipWindow();
       scrollServiceYpos--;
@@ -3294,8 +3366,9 @@ void busDeparturesLoop() {
     if (station.numServices>2) {
       u8g2.setClipWindow(0,ULINE3,256,ULINE3+10);
       drawBusService(2,scrollPrimaryYpos+ULINE3-1,busDestX);
-    } else if (station.numServices<3 && messages.numMessages==1) {
-      // scroll up the attribution once...
+    } else if (station.numServices<3 && messages.numMessages==1 && boardMode!=MODE_DKBUS) {
+      // scroll up the attribution once... (not applicable to DK Bus - no attribution requirement,
+      // and it's been removed per the user's request)
       u8g2.setClipWindow(0,ULINE3,256,ULINE3+10);
       centreText(btAttribution,scrollPrimaryYpos+ULINE3-1);
     }
