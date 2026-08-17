@@ -909,10 +909,16 @@ void drawSleepingScreen() {
       strftime(sysDate,29,"%d %B %Y",&timeinfo);
     }
 
-    int offset = (getStringWidth(sysDate)-44)/2;
+    // Measure sysDate with the font it's actually drawn in (NatRailSmall9, set below) rather than
+    // whatever font happened to be active beforehand - otherwise the random x position is sized
+    // for the wrong (narrower) font metrics and long date strings (e.g. Danish full month names)
+    // can run off the right edge of the screen.
+    u8g2.setFont(NatRailSmall9);
+    int dateWidth = getStringWidth(sysDate);
+    int offset = (dateWidth-44)/2;
     u8g2.setFont(NatRailClockLarge9);
     int y = random(39);
-    int x = random(SCREEN_WIDTH-getStringWidth(sysDate));
+    int x = random(SCREEN_WIDTH-dateWidth);
     u8g2.drawStr(x+offset,y,sysTime);
     u8g2.setFont(NatRailSmall9);
     u8g2.drawStr(x,y+13,sysDate);
