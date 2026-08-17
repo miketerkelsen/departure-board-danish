@@ -46,6 +46,10 @@ class rejseplanenClient: public JsonListenerGS {
           char rtTrack[4];
           bool cancelled;
           int catCode;
+          char catOut[16];      // e.g. "IC", "Re", "ECE", "Bus", "Togbus" - the reliable signal for
+                                 // whether a service is actually a bus (catCode is reused for
+                                 // unrelated categories like international trains, e.g. catCode 3
+                                 // covers both Togbus AND EuroCity/RailJet/Snalltaget at some stations)
           char ref[MAXJOURNEYREFSIZE];
           char opco[50];
           char direction[MAXLOCATIONSIZE];

@@ -38,6 +38,20 @@ static void truncateSeconds(char* t) {
     if (t[0] && strlen(t) > 5 && t[2] == ':' && t[5] == ':') t[5] = '\0';
 }
 
+// Case-insensitive substring search (avoids pulling in strcasestr, which isn't universally
+// available in the ESP32 toolchain's libc).
+static bool containsCaseInsensitive(const char* haystack, const char* needle) {
+    if (!haystack[0] || !needle[0]) return false;
+    size_t hLen = strlen(haystack), nLen = strlen(needle);
+    if (nLen > hLen) return false;
+    for (size_t i=0; i<=hLen-nLen; i++) {
+        size_t j=0;
+        while (j<nLen && tolower((unsigned char)haystack[i+j])==tolower((unsigned char)needle[j])) j++;
+        if (j==nLen) return true;
+    }
+    return false;
+}
+
 // Rejseplanen sends station/destination names as UTF-8, so æ/ø/å (and other Latin-1 supplement
 // letters, e.g. é) arrive as 2-byte sequences (0xC3 0x80-0xBF). The board's fonts are built with
 // -DU8G2_WITHOUT_UNICODE, but that flag only disables *multi-byte* UTF-8 decoding for codepoints
@@ -77,6 +91,7 @@ void rejseplanenClient::resetRawRecord() {
     raw.rtTrack[0] = '\0';
     raw.cancelled = false;
     raw.catCode = -1;
+    raw.catOut[0] = '\0';
     raw.ref[0] = '\0';
     raw.opco[0] = '\0';
     raw.direction[0] = '\0';
@@ -106,7 +121,12 @@ void rejseplanenClient::finaliseDepartureRecord() {
     if (raw.rtTrack[0]) strlcpy(svc.platform, raw.rtTrack, sizeof(svc.platform));
     else if (raw.track[0]) strlcpy(svc.platform, raw.track, sizeof(svc.platform));
 
-    svc.serviceType = (raw.catCode == 3) ? BUS : TRAIN; // Togbus (rail-replacement) gets the bus icon
+    // catCode is *not* a reliable bus signal on its own - Rejseplanen reuses the same catCode
+    // number for unrelated categories at different stations (e.g. catCode 3 covers both genuine
+    // Togbus rail-replacement buses AND international long-distance trains like EuroCity/RailJet/
+    // Snalltaget at Odense). catOut is the human-readable product abbreviation and reliably says
+    // "Bus" for anything bus-shaped, so match on that instead.
+    svc.serviceType = containsCaseInsensitive(raw.catOut,"bus") ? BUS : TRAIN;
 
     char rtTimeShort[6];
     strlcpy(rtTimeShort, raw.rtTime, sizeof(rtTimeShort));
@@ -178,6 +198,7 @@ void rejseplanenClient::value(const char *value) {
         else if (strcmp(currentPath,"Departure/cancelled")==0) raw.cancelled = (strcmp(value,"true")==0);
         else if (strcmp(currentPath,"Departure/JourneyDetailRef/ref")==0) strlcpy(raw.ref,value,sizeof(raw.ref));
         else if (strcmp(currentPath,"Departure/ProductAtStop/catCode")==0) raw.catCode = atoi(value);
+        else if (strcmp(currentPath,"Departure/ProductAtStop/catOut")==0) strlcpy(raw.catOut,value,sizeof(raw.catOut));
         else if (strcmp(currentPath,"Departure/ProductAtStop/operator")==0) strlcpy(raw.opco,value,sizeof(raw.opco));
     } else {
         if (strcmp(currentPath,"Stops/Stop/name")==0) strlcpy(stopScratchName,value,sizeof(stopScratchName));
