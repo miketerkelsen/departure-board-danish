@@ -3005,11 +3005,12 @@ void departureBoardLoop() {
       line3Service++;
       if (station.numServices) {
         // How many "extra" info slots exist beyond the departure list itself: weather (if enabled)
-        // and the mandatory attribution (not shown on DK Rail - see drawServiceLine). Sizing the
-        // rollover to the actual slot count (rather than assuming attribution always exists) avoids
-        // cycling through a dead blank slot when neither is present.
+        // and the mandatory attribution (not shown on DK Rail - see drawServiceLine). The extra
+        // slots occupy indices numServices .. numServices+extraSlots-1, so wrap as soon as
+        // line3Service would reach numServices+extraSlots (>=, not >, which let one dead slot
+        // through regardless of extraSlots - the actual cause of the still-visible gap).
         int extraSlots = (weatherMsg[0]?1:0) + (boardMode!=MODE_DKRAIL?1:0);
-        if (line3Service>station.numServices+extraSlots) line3Service=(noScrolling && station.numServices>1) ? 2:1;  // First 'other' service
+        if (line3Service>=station.numServices+extraSlots) line3Service=(noScrolling && station.numServices>1) ? 2:1;  // First 'other' service
       } else {
         if (weatherMsg[0] && line3Service>1) line3Service=0;
       }
