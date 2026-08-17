@@ -589,15 +589,23 @@ int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
 }
 
 int getMixedStringWidth(const char *text, const uint8_t *accentFont) {
-  const uint8_t *baseFont = u8g2.getU8g2()->font;
+  // NB: deliberately NOT u8g2.getStrWidth() per character. u8g2_string_width() (which that calls)
+  // sums each glyph's *advance* width (delta_x) except the last character of the string, which it
+  // measures "tight" (actual glyph pixel width instead of delta_x, to avoid counting trailing
+  // letter-spacing past the true last character). Calling getStrWidth() on a series of one-character
+  // strings makes EVERY character get that tight treatment, understating the total width versus
+  // what drawMixedStr() actually draws (which sums the full advance width for every glyph, same as
+  // a single whole-string drawStr() call would) - the gap compounds with string length and was
+  // letting right-aligned text (e.g. the header date) run off the edge of the screen.
+  // u8g2_GetGlyphWidth() returns that same advance/delta_x value directly, so use it instead.
+  u8g2_t *u = u8g2.getU8g2();
+  const uint8_t *baseFont = u->font;
   int width = 0;
-  char buf[2] = {0,0};
   for (const char *p = text; *p; p++) {
     unsigned char c = (unsigned char)*p;
-    buf[0] = (char)c;
     bool isAccent = isDanishAccentByte(c);
     if (isAccent) u8g2.setFont(accentFont);
-    width += u8g2.getStrWidth(buf);
+    width += u8g2_GetGlyphWidth(u,c);
     if (isAccent) u8g2.setFont(baseFont);
   }
   return width;
