@@ -748,22 +748,17 @@ void drawScrollingDestination(destScrollState &state, const char *text, int x, i
       state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
     }
   }
-  // Intersect with whatever clip window the caller already had set, then restore it exactly
-  // afterwards - NOT u8g2.setMaxClipWindow(), which would reset clipping to the entire screen and
-  // blow away an outer clip a caller is relying on for its own purposes (e.g. the line-3 scroll-in
-  // transition clips the whole row to bound its slide animation; unconditionally maxing the clip
-  // window out from in here was breaking that mid-slide, causing visible artifacts between rows).
-  u8g2_t *u = u8g2.getU8g2();
-  u8g2_uint_t savedX0=u->clip_x0, savedY0=u->clip_y0, savedX1=u->clip_x1, savedY1=u->clip_y1;
-  int newX0 = max((int)savedX0, x);
-  int newY0 = max((int)savedY0, y-rowHeight);
-  int newX1 = min((int)savedX1, x+width);
-  int newY1 = min((int)savedY1, y+4);
-  if (newX0<0) newX0=0;
-  if (newY0<0) newY0=0;
-  if (newX1>newX0 && newY1>newY0) u8g2.setClipWindow(newX0,newY0,newX1,newY1);
+  // Sets its own clip window for exactly this draw, then hands clipping fully back to the caller
+  // (setMaxClipWindow) rather than trying to nest with/restore whatever the caller had - callers
+  // that need their own bound around a whole row spanning multiple draws (e.g. a scroll-in
+  // transition) must (re)establish it themselves immediately before each such draw; see the
+  // isScrollingService-style blocks that call this indirectly via drawServiceLine()/
+  // drawOdenseGroupServiceAt() for the pattern.
+  int clipY0 = y-rowHeight;
+  if (clipY0<0) clipY0=0;
+  u8g2.setClipWindow(x,clipY0,x+width,y+4);
   drawMixedStr(x+state.offset, y, text, accentFont);
-  u8g2_SetClipWindow(u,savedX0,savedY0,savedX1,savedY1);
+  u8g2.setMaxClipWindow();
 }
 
 // Danish modes are always drawn in the original custom fonts now - only the accented letters get
@@ -3205,10 +3200,15 @@ void departureBoardLoop() {
     // widen on both edges.
     blankArea(0,LINE3-1,256,11);
     if (scrollServiceYpos) {
-      // we're scrolling the service into view
+      // we're scrolling the service into view. Re-set the clip window immediately before EACH draw
+      // (not just once before both) - drawServiceLine() can itself narrow/reset the clip window
+      // (for its own destination-scrolling, via drawScrollingDestination()), so re-asserting the
+      // row bound here guarantees the second draw gets it too regardless of what the first left
+      // behind.
       u8g2.setClipWindow(0,LINE3-1,256,LINE3+10);
       // if the prev service is showing, we need to scroll it up off
       if (prevService>0) drawServiceLine(prevService,scrollServiceYpos+LINE3-12);
+      u8g2.setClipWindow(0,LINE3-1,256,LINE3+10);
       drawServiceLine(line3Service,scrollServiceYpos+LINE3-1);
       u8g2.setMaxClipWindow();
       scrollServiceYpos--;
@@ -3717,8 +3717,11 @@ void odenseBusLoop() {
         int matches[MAXBOARDSERVICES];
         int matchCount = findOdenseGroupMatches(odenseGroupPrefix[g],matches);
         blankArea(0,y-1,256,11);
+        // Re-set the clip window immediately before EACH draw (not just once before both) - see the
+        // matching comment in departureBoardLoop()'s isScrollingService block for why.
         u8g2.setClipWindow(0,y-1,256,y+10);
         drawOdenseGroupServiceAt(g,matches,matchCount,odensePrevIndex[g],odenseScrollYpos[g]+y-12);
+        u8g2.setClipWindow(0,y-1,256,y+10);
         drawOdenseGroupServiceAt(g,matches,matchCount,odenseGroupIndex[g],odenseScrollYpos[g]+y-1);
         u8g2.setMaxClipWindow();
         odenseScrollYpos[g]--;
