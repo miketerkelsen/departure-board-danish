@@ -748,9 +748,22 @@ void drawScrollingDestination(destScrollState &state, const char *text, int x, i
       state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
     }
   }
-  u8g2.setClipWindow(x, y-rowHeight, x+width, y+4);
+  // Intersect with whatever clip window the caller already had set, then restore it exactly
+  // afterwards - NOT u8g2.setMaxClipWindow(), which would reset clipping to the entire screen and
+  // blow away an outer clip a caller is relying on for its own purposes (e.g. the line-3 scroll-in
+  // transition clips the whole row to bound its slide animation; unconditionally maxing the clip
+  // window out from in here was breaking that mid-slide, causing visible artifacts between rows).
+  u8g2_t *u = u8g2.getU8g2();
+  u8g2_uint_t savedX0=u->clip_x0, savedY0=u->clip_y0, savedX1=u->clip_x1, savedY1=u->clip_y1;
+  int newX0 = max((int)savedX0, x);
+  int newY0 = max((int)savedY0, y-rowHeight);
+  int newX1 = min((int)savedX1, x+width);
+  int newY1 = min((int)savedY1, y+4);
+  if (newX0<0) newX0=0;
+  if (newY0<0) newY0=0;
+  if (newX1>newX0 && newY1>newY0) u8g2.setClipWindow(newX0,newY0,newX1,newY1);
   drawMixedStr(x+state.offset, y, text, accentFont);
-  u8g2.setMaxClipWindow();
+  u8g2_SetClipWindow(u,savedX0,savedY0,savedX1,savedY1);
 }
 
 // Danish modes are always drawn in the original custom fonts now - only the accented letters get
