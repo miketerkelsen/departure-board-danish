@@ -573,18 +573,52 @@ static bool isDanishAccentByte(unsigned char c) {
   return c==0xE6 || c==0xF8 || c==0xE5 || c==0xC6 || c==0xD8 || c==0xC5; // æ ø å Æ Ø Å
 }
 
+// u8g2 internals not exposed via the public U8g2lib.h/u8g2.h API, needed below to read a specific
+// glyph's own encoded height/y-offset. u8g2_GetGlyphWidth() (the only public per-glyph accessor)
+// decodes and then silently discards exactly this y-offset value - see its source in u8g2_font.c.
+// These three are not declared `static` in u8g2_font.c, so they're externally linkable even though
+// no header exposes them.
+extern "C" {
+  const uint8_t *u8g2_font_get_glyph_data(u8g2_t *u8g2, uint16_t encoding);
+  uint8_t u8g2_font_decode_get_unsigned_bits(u8g2_font_decode_t *f, uint8_t cnt);
+  int8_t u8g2_font_decode_get_signed_bits(u8g2_font_decode_t *f, uint8_t cnt);
+}
+
+// Decodes just the (height, y-offset) header fields for one glyph of the CURRENTLY active font -
+// the same two values u8g2_font_decode_glyph() uses internally (as "target_y -= height+y_offset")
+// to position that specific glyph's pixels. Uses a local decode_t so it can't disturb any decode
+// u8g2 itself has in progress.
+static bool getGlyphVerticalMetrics(u8g2_t *u, uint16_t encoding, int8_t *outHeight, int8_t *outYOffset) {
+  const uint8_t *glyphData = u8g2_font_get_glyph_data(u, encoding);
+  if (!glyphData) return false;
+  u8g2_font_decode_t decode;
+  decode.decode_ptr = glyphData;
+  decode.decode_bit_pos = 0;
+  u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_width); // glyph width, unused here
+  *outHeight = u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_height);
+  u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_x); // x offset, unused here
+  *outYOffset = u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_y);
+  return true;
+}
+
 int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
   // The board runs in setFontPosTop()+setFontRefHeightAll() mode, which recalculates u8g2's
   // internal vertical reference point (font_ref_ascent) from the ACTIVE font's own metadata every
   // time setFont() is called - u8g2_SetFont() -> u8g2_UpdateRefHeight() does this automatically.
-  // That reference point directly shifts where "y" ends up drawing on screen. Since the accent
-  // font's metadata differs from the base font's, swapping fonts mid-string (as every accented
-  // character does here) silently shifts just that one character up or down relative to its
-  // neighbours by however much the two fonts' computed reference ascents differ (this is what was
-  // making accented letters look vertically misaligned, most visibly on the primary departure
-  // line). Cache the base font's reference ascent, then after switching to the accent font, shift y
-  // by the difference so the accent glyph lands on the exact same visual baseline as the rest of
-  // the line, regardless of which stock font is used for it.
+  // Swapping to the accent font mid-string and back therefore shifts that one character by however
+  // much the two fonts' reference ascents differ. That's the FIRST correction below (yShift).
+  //
+  // But each individual glyph *also* carries its own encoded height/y-offset, applied on top of
+  // that font-level reference (see u8g2_font_decode_glyph() in u8g2_font.c: "target_y -= h+y").
+  // These per-glyph values are not uniform even within one font - e.g. u8g2_font_6x13_tf's 'ø' has
+  // a different (height, y-offset) than its 'æ' - and the custom board fonts happen to encode a
+  // uniform +2 y-offset baked into every one of their own glyphs, which the stock accent fonts
+  // don't share. The font-level correction alone can't account for this: it was leaving specific
+  // accented letters (most visibly ø/Ø) sitting visibly low even once the font-level reference
+  // matched. The SECOND correction below reads the exact (height, y-offset) u8g2 will use for the
+  // specific accent character being drawn, compares it against a same-case reference letter (o/O)
+  // in the base font, and adds the difference - reproducing exactly what u8g2 would do if the base
+  // font itself had a glyph for this character.
   u8g2_t *u = u8g2.getU8g2();
   const uint8_t *baseFont = u->font;
   int8_t baseAscent = u8g2_GetFontAscent(u);
@@ -595,8 +629,16 @@ int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
     buf[0] = (char)c;
     bool isAccent = isDanishAccentByte(c);
     if (isAccent) {
+      bool isUpper = (c < 0xE0); // Æ/Ø/Å are 0xC6/0xD8/0xC5, æ/ø/å are 0xE6/0xF8/0xE5
+      uint16_t refChar = isUpper ? 'O' : 'o';
+      int8_t baseH=0, baseYoff=0;
+      bool haveBaseMetrics = getGlyphVerticalMetrics(u, refChar, &baseH, &baseYoff);
       u8g2.setFont(accentFont);
       int yShift = baseAscent - u8g2_GetFontAscent(u);
+      int8_t accentH=0, accentYoff=0;
+      if (haveBaseMetrics && getGlyphVerticalMetrics(u, c, &accentH, &accentYoff)) {
+        yShift += (accentH - baseH) + (accentYoff - baseYoff);
+      }
       cursorX += u8g2.drawStr(cursorX, y+yShift, buf);
       u8g2.setFont(baseFont);
     } else {
@@ -3038,13 +3080,11 @@ void departureBoardLoop() {
   }
 
   if (isScrollingStops && millis()>timer && !isSleeping && !noScrolling) {
-    // Widened 1px on top vs. the base font's own 9px row height: u8g2_font_6x10_tf is a 10px font,
-    // and the diacritic-topped Å/å glyph (its ring sits above where a plain "A" tops out, which is
-    // what the font's ascent metric is based on) can reach a pixel higher than that metric implies,
-    // poking above a window sized only for the base font and getting silently clipped - which read
-    // as the accented letter "sitting low" (only its lower portion stayed visible). The bottom edge
-    // is left alone: for the common case (msgLine == LINE4) it already sits exactly at the screen's
-    // bottom row.
+    // Widened 1px on top vs. the base font's own 9px row height, as safety margin: u8g2_font_6x10_tf
+    // is a 10px font, and drawMixedStr()'s per-glyph vertical correction (see its own comment) can
+    // still place a tall accent glyph a pixel above where the base font's own glyphs ever reach. The
+    // bottom edge is left alone: for the common case (msgLine == LINE4) it already sits exactly at
+    // the screen's bottom row.
     blankArea(msgMargin,msgLine-1,msgWidth,10);
     u8g2.setClipWindow(msgMargin,msgLine-1,SCREEN_WIDTH,msgLine+9);
     if (scrollStopsYpos) {
@@ -3079,10 +3119,10 @@ void departureBoardLoop() {
 
   if (isScrollingService && millis()>serviceTimer && !isSleeping && !noServiceClockIsActive) {
     // Widened 1px top and bottom vs. the base font's own 9px row height - see the matching comment
-    // above the calling-at message block for why (u8g2_font_6x10_tf's Å/å glyph can poke a pixel
-    // above a window sized only for the base font). This row has clearance on both sides (LINE2's
-    // content ends well above LINE3, and LINE4 starts well below LINE3+9), so unlike the calling-at
-    // row this one can safely widen on both edges.
+    // above the calling-at message block for why (safety margin around drawMixedStr()'s per-glyph
+    // vertical correction). This row has clearance on both sides (LINE2's content ends well above
+    // LINE3, and LINE4 starts well below LINE3+9), so unlike the calling-at row this one can safely
+    // widen on both edges.
     blankArea(0,LINE3-1,256,11);
     if (scrollServiceYpos) {
       // we're scrolling the service into view
