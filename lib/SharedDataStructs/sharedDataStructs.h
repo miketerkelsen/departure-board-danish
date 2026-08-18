@@ -40,6 +40,11 @@ struct rdService {
     int trainLength;
     byte classesAvailable;
     char opco[50];
+    char stopArea[40];  // Rejseplanen Departure.stop, minus its trailing "(<municipality>)" - the
+                         // specific stand/platform-area a service leaves from at hub stops that
+                         // combine several physical stands under one stop id (e.g. Odense St.'s
+                         // "OBC Nord Plads H"/"OBC Syd Plads A"/"Ejlskovsgade"). Empty for clients
+                         // that don't populate it.
 
     int serviceType;
     int timeToStation;  // Only for TfL
@@ -71,6 +76,7 @@ struct rdService {
     char opco[50];
     char calling[MAXCALLINGSIZE];
     char serviceMessage[MAXMESSAGESIZE];
+    char stopArea[40];  // see rdService.stopArea
     int serviceType;
     char serviceID[MAXJOURNEYREFSIZE];  // LDBWS service id (UK) or JourneyDetailRef.ref token (Rejseplanen)
     char sortTime[6];

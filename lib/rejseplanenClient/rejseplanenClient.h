@@ -54,6 +54,8 @@ class rejseplanenClient: public JsonListenerGS {
           char opco[50];
           char direction[MAXLOCATIONSIZE];
           char name[MAXLINESIZE];
+          char stop[64];        // Departure.stop - the specific stand/platform-area at hub stops
+                                 // that combine several physical stands under one stop id
         };
 
         const char* rjHost = "www.rejseplanen.dk";

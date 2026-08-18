@@ -96,6 +96,17 @@ void rejseplanenClient::resetRawRecord() {
     raw.opco[0] = '\0';
     raw.direction[0] = '\0';
     raw.name[0] = '\0';
+    raw.stop[0] = '\0';
+}
+
+// Rejseplanen's Departure.stop is e.g. "OBC Nord Plads H (Odense Kommune)" - strip the trailing
+// " (<municipality>)" so callers get just the stand/platform-area name to match against.
+static void stripMunicipalitySuffix(char* stop) {
+    char* paren = strchr(stop, '(');
+    if (paren) {
+        if (paren > stop && *(paren-1) == ' ') paren--;
+        *paren = '\0';
+    }
 }
 
 // Called when a Departure record's closing '}' is seen - reconcile the scratch fields
@@ -116,6 +127,10 @@ void rejseplanenClient::finaliseDepartureRecord() {
     strlcpy(svc.via, raw.name, sizeof(svc.via));
     strlcpy(svc.opco, raw.opco, sizeof(svc.opco));
     strlcpy(svc.serviceID, raw.ref, sizeof(svc.serviceID));
+
+    strlcpy(svc.stopArea, raw.stop, sizeof(svc.stopArea));
+    stripMunicipalitySuffix(svc.stopArea);
+    convertDanishToLatin1(svc.stopArea, sizeof(svc.stopArea));
 
     svc.platform[0] = '\0';
     if (raw.rtTrack[0]) strlcpy(svc.platform, raw.rtTrack, sizeof(svc.platform));
@@ -191,6 +206,7 @@ void rejseplanenClient::value(const char *value) {
     if (fetchingDepartures) {
         if (strcmp(currentPath,"Departure/name")==0) strlcpy(raw.name,value,sizeof(raw.name));
         else if (strcmp(currentPath,"Departure/direction")==0) strlcpy(raw.direction,value,sizeof(raw.direction));
+        else if (strcmp(currentPath,"Departure/stop")==0) strlcpy(raw.stop,value,sizeof(raw.stop));
         else if (strcmp(currentPath,"Departure/time")==0) strlcpy(raw.time,value,sizeof(raw.time));
         else if (strcmp(currentPath,"Departure/rtTime")==0) strlcpy(raw.rtTime,value,sizeof(raw.rtTime));
         else if (strcmp(currentPath,"Departure/track")==0) strlcpy(raw.track,value,sizeof(raw.track));
@@ -542,6 +558,7 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         station->service[i].trainLength = xStation->service[i].trainLength;
         station->service[i].classesAvailable = xStation->service[i].classesAvailable;
         strlcpy(station->service[i].opco, xStation->service[i].opco, sizeof(station->service[0].opco));
+        strlcpy(station->service[i].stopArea, xStation->service[i].stopArea, sizeof(station->service[0].stopArea));
         station->service[i].serviceType = xStation->service[i].serviceType;
     }
     if (xStation->numServices) {

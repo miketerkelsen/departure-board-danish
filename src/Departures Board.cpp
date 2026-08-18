@@ -318,6 +318,8 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define LETBANE_PRODUCTS 2048          // Rejseplanen product bitmask: bit 11 (Letbane)
 #define DKBUS_PRODUCTS 32              // Rejseplanen product bitmask: bit 5 (Bus)
 
+#define ODENSE_ST_ID "8600512"         // see odenseBusLoop() for what this gates
+
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
 #define DATAUPDATEINTERVAL 90000      // How often we fetch data from National Rail (ms - 1.5 mins) - "default" option
 #define FASTDATAUPDATEINTERVAL 45000  // How often we fetch data from National Rail (ms - 45 secs) - "fast" option
@@ -521,6 +523,19 @@ struct destScrollState {
 static destScrollState primaryDestScroll;   // LINE1 - the primary (1st) departure
 static destScrollState line2DestScroll;     // LINE2 - the static 2nd departure (noScrolling mode only)
 static destScrollState line3DestScroll;     // LINE3 - the rotating "other departures" slot
+
+// Odense St. bus board special case (see odenseBusLoop()): Rejseplanen's stop id 8600512 combines
+// several physically distinct bus terminal areas under one departureBoard query, distinguished only
+// by each departure's stop field (captured as service[].stopArea). Rather than one merged rotating
+// list, this shows one fixed line per area, each rotating independently through its own filtered
+// departures - only active for boardMode==MODE_DKBUS at this exact stop id (ODENSE_ST_ID); every
+// other DK Bus configuration (any other stop) uses the normal busDeparturesLoop()/
+// drawBusDeparturesBoard() above, completely untouched.
+static const char* const odenseGroupPrefix[3] = {"OBC Nord","OBC Syd","Ejlskovsgade"};
+static const int odenseGroupY[3] = {ULINE1,ULINE2,ULINE3};
+static int odenseGroupIndex[3] = {0,0,0};       // which match within each group's filtered list is shown
+static unsigned long odenseGroupTimer[3] = {0,0,0};
+static destScrollState odenseGroupDestScroll[3];
 
 static char displayedTime[9] = "";        // The currently displayed time
 static char currentTime[9] = "";          // The current time (keep updated in loop)
@@ -3540,6 +3555,134 @@ void busDeparturesLoop() {
   }
 }
 
+// Fills 'matches' with the indices into station.service[] whose stopArea starts with
+// 'groupPrefix' (e.g. "OBC Nord" matches both "OBC Nord Plads H" and "OBC Nord Plads I"), in the
+// order they already appear (station.service[] is time-sorted). Returns how many were found.
+int findOdenseGroupMatches(const char *groupPrefix, int *matches) {
+  int count = 0;
+  size_t prefixLen = strlen(groupPrefix);
+  for (int i=0;i<station.numServices && count<MAXBOARDSERVICES;i++) {
+    if (strncmp(station.service[i].stopArea,groupPrefix,prefixLen)==0) matches[count++] = i;
+  }
+  return count;
+}
+
+// Draws one Odense-specific line: the group's currently-selected departure (odenseGroupIndex[group],
+// wrapped to however many actually matched), or a "no departures" message if none matched at all.
+// Shows the stand letter ("Plads H") in place of the platform/track field regular bus departures
+// don't otherwise carry - Ejlskovsgade has no stands, so it's simply omitted there.
+void drawOdenseGroupLine(int group) {
+  int y = odenseGroupY[group];
+  setSmallFont();
+  blankArea(0,y,256,9);
+
+  int matches[MAXBOARDSERVICES];
+  int matchCount = findOdenseGroupMatches(odenseGroupPrefix[group],matches);
+  if (matchCount==0) {
+    char msg[48];
+    sprintf(msg,"%s: ingen planlagte afgange",odenseGroupPrefix[group]);
+    centreMixedText(msg,y-1,u8g2_font_6x10_tf);
+    return;
+  }
+  if (odenseGroupIndex[group]>=matchCount) odenseGroupIndex[group] = 0;
+  rdService &svc = station.service[matches[odenseGroupIndex[group]]];
+
+  int destPos = u8g2.drawStr(0,y-1,svc.via) + 6; // route number, e.g. "Bus 35"
+  char etd[16];
+  if (isDigit(svc.etd[0])) sprintf(etd,"Forventet %s",svc.etd);
+  else strcpy(etd,svc.etd);
+  int etdWidth = getStringWidth(etd) + 6;
+  u8g2.drawStr(SCREEN_WIDTH-etdWidth,y-1,etd);
+  int spaceAvailable = SCREEN_WIDTH-destPos-etdWidth-6;
+
+  const char *pladsPos = strstr(svc.stopArea,"Plads ");
+  if (pladsPos) {
+    char plads[16];
+    sprintf(plads,"Plads %s",pladsPos+6);
+    int pladsWidth = getStringWidth(plads) + 7;
+    u8g2.drawStr(SCREEN_WIDTH-etdWidth-pladsWidth,y-1,plads);
+    spaceAvailable -= pladsWidth;
+  }
+
+  char clipDestination[MAXLOCATIONSIZE+5];
+  strcpy(clipDestination,svc.destination);
+  drawScrollingDestination(odenseGroupDestScroll[group],clipDestination,destPos,y-1,spaceAvailable,10,u8g2_font_6x10_tf);
+}
+
+// Full (re)draw of the Odense bus board: header plus all three group lines, from scratch. Called on
+// every data refresh, and once when first switching into this view.
+void drawOdenseBusBoard() {
+  if (firstLoad) {
+    u8g2.clearBuffer();
+    u8g2.setContrast(brightness);
+    firstLoad=false;
+  }
+  drawStationHeader(locationName,"",locationFilter,0);
+  for (int g=0;g<3;g++) {
+    odenseGroupIndex[g] = 0;
+    odenseGroupTimer[g] = millis() + 5000;
+    drawOdenseGroupLine(g);
+  }
+  u8g2.sendBuffer();
+}
+
+// Odense St. bus board loop - see the odenseGroup* globals' comment for what this is and why it's
+// separate from busDeparturesLoop() above. Mirrors that function's data-fetch/error-handling
+// structure, but replaces its primary+rotating-third-slot layout with three independently-rotating
+// group lines.
+void odenseBusLoop() {
+  if (millis()>nextDataUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+    if (!firstLoad) showUpdateIcon(true);
+    fetchMode = FETCH_BOARD;
+    fetchInProgress = true;
+    xTaskNotifyGive(fetchTaskHandle);
+    if (firstLoad) waitForFirstLoad();
+    if (lastUpdateResult == UPD_NO_CHANGE) lastUpdateResult = UPD_SUCCESS;
+  }
+
+  if (fetchComplete && updateIconVisible) showUpdateIcon(false);
+
+  if (fetchComplete && !isSleeping) {
+    fetchComplete = false;
+    if (lastUpdateResult == UPD_SUCCESS || lastUpdateResult == UPD_NO_CHANGE) {
+      if (lastUpdateResult == UPD_SUCCESS) updateBusDepartures();
+      drawOdenseBusBoard();
+    } else if (lastUpdateResult == UPD_DATA_ERROR || lastUpdateResult == UPD_TIMEOUT || lastUpdateResult == UPD_HTTP_ERROR) {
+      lastLoadFailure = millis();
+      dataLoadFailure++;
+      if (noDataLoaded) showNoDataScreen(); else drawOdenseBusBoard();
+    } else if (lastUpdateResult == UPD_UNAUTHORISED) {
+      showTokenErrorScreen();
+      while (true) delay(10);
+    } else {
+      dataLoadFailure++;
+    }
+  }
+
+  // Each group's line independently flips to its next departure every few seconds, and separately
+  // ping-pong scrolls its own destination if that doesn't fit (see drawScrollingDestination()).
+  if (!isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !noDataLoaded) {
+    for (int g=0;g<3;g++) {
+      bool needsRedraw = false;
+      if (millis()>=odenseGroupTimer[g]) {
+        odenseGroupIndex[g]++;
+        odenseGroupTimer[g] = millis() + 5000;
+        needsRedraw = true;
+      }
+      if (odenseGroupDestScroll[g].active && millis()>=odenseGroupDestScroll[g].nextStep) needsRedraw = true;
+      if (needsRedraw) drawOdenseGroupLine(g);
+    }
+  }
+
+  if (!isSleeping) {
+    if (drawCurrentTimeUG()) setSmallFont();
+    delayMs = frameTimeBus - (millis()-refreshTimer);
+    if (delayMs>0) delay(delayMs);
+    u8g2.updateDisplayArea(0,1,32,6);
+    refreshTimer=millis();
+  }
+}
+
 // The Core 0 Background Task
 void fetchDeparturesTask(void *pvParameters) {
   while(true) {
@@ -4080,7 +4223,7 @@ void loop(void) {
       break;
 
     case MODE_DKBUS:
-      busDeparturesLoop();
+      if (strcmp(locationCode,ODENSE_ST_ID)==0) odenseBusLoop(); else busDeparturesLoop();
       break;
   }
 
