@@ -536,6 +536,11 @@ static const int odenseGroupY[3] = {ULINE1,ULINE2,ULINE3};
 static int odenseGroupIndex[3] = {0,0,0};       // which match within each group's filtered list is shown
 static unsigned long odenseGroupTimer[3] = {0,0,0};
 static destScrollState odenseGroupDestScroll[3];
+// Scroll-in transition (mirrors line3Service/scrollServiceYpos/isScrollingService in
+// departureBoardLoop(), applied independently per group line - see odenseBusLoop()).
+static int odensePrevIndex[3] = {0,0,0};
+static int odenseScrollYpos[3] = {0,0,0};
+static bool odenseIsScrolling[3] = {false,false,false};
 
 static char displayedTime[9] = "";        // The currently displayed time
 static char currentTime[9] = "";          // The current time (keep updated in loop)
@@ -613,19 +618,25 @@ extern "C" {
   int8_t u8g2_font_decode_get_signed_bits(u8g2_font_decode_t *f, uint8_t cnt);
 }
 
-// Decodes just the (height, y-offset) header fields for one glyph of the CURRENTLY active font -
-// the same two values u8g2_font_decode_glyph() uses internally (as "target_y -= height+y_offset")
-// to position that specific glyph's pixels. Uses a local decode_t so it can't disturb any decode
-// u8g2 itself has in progress.
-static bool getGlyphVerticalMetrics(u8g2_t *u, uint16_t encoding, int8_t *outHeight, int8_t *outYOffset) {
+// Decodes just the y-offset header field for one glyph of the CURRENTLY active font. u8g2 positions
+// a glyph's BOTTOM edge (its baseline-anchored resting point - what matters for lining up with
+// neighbouring characters) at "y_input + vref - y_offset": note that's independent of the glyph's
+// height, which only controls how far it extends upward from that bottom edge, not where the
+// bottom itself sits (see u8g2_font_decode_glyph() in u8g2_font.c: "target_y -= height+y_offset",
+// and target_y+height is therefore just "y_input + vref - y_offset" with height cancelled out).
+// That's why this only needs y-offset, not height - an earlier version of this fix also factored in
+// height, which happened to work for æøÆØ (same height as their font's other letters) but pulled
+// å/Å down, since their ring diacritic makes them taller than a plain a/A without actually needing
+// to sit any lower. Uses a local decode_t so it can't disturb any decode u8g2 itself has in progress.
+static bool getGlyphYOffset(u8g2_t *u, uint16_t encoding, int8_t *outYOffset) {
   const uint8_t *glyphData = u8g2_font_get_glyph_data(u, encoding);
   if (!glyphData) return false;
   u8g2_font_decode_t decode;
   decode.decode_ptr = glyphData;
   decode.decode_bit_pos = 0;
-  u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_width); // glyph width, unused here
-  *outHeight = u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_height);
-  u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_x); // x offset, unused here
+  u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_width);  // glyph width, unused here
+  u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_height); // glyph height, unused here (see above)
+  u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_x);        // x offset, unused here
   *outYOffset = u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_y);
   return true;
 }
@@ -660,13 +671,13 @@ int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
     if (isAccent) {
       bool isUpper = (c < 0xE0); // Æ/Ø/Å are 0xC6/0xD8/0xC5, æ/ø/å are 0xE6/0xF8/0xE5
       uint16_t refChar = isUpper ? 'O' : 'o';
-      int8_t baseH=0, baseYoff=0;
-      bool haveBaseMetrics = getGlyphVerticalMetrics(u, refChar, &baseH, &baseYoff);
+      int8_t baseYoff=0;
+      bool haveBaseMetrics = getGlyphYOffset(u, refChar, &baseYoff);
       u8g2.setFont(accentFont);
       int yShift = baseAscent - u8g2_GetFontAscent(u);
-      int8_t accentH=0, accentYoff=0;
-      if (haveBaseMetrics && getGlyphVerticalMetrics(u, c, &accentH, &accentYoff)) {
-        yShift += (accentH - baseH) + (accentYoff - baseYoff);
+      int8_t accentYoff=0;
+      if (haveBaseMetrics && getGlyphYOffset(u, c, &accentYoff)) {
+        yShift += accentYoff - baseYoff;
       }
       cursorX += u8g2.drawStr(cursorX, y+yShift, buf);
       u8g2.setFont(baseFont);
@@ -3567,25 +3578,22 @@ int findOdenseGroupMatches(const char *groupPrefix, int *matches) {
   return count;
 }
 
-// Draws one Odense-specific line: the group's currently-selected departure (odenseGroupIndex[group],
-// wrapped to however many actually matched), or a "no departures" message if none matched at all.
-// Shows the stand letter ("Plads H") in place of the platform/track field regular bus departures
-// don't otherwise carry - Ejlskovsgade has no stands, so it's simply omitted there.
-void drawOdenseGroupLine(int group) {
-  int y = odenseGroupY[group];
+// Draws the departure at 'matches[matchIndex]' (wrapped to matchCount, or a "no departures" message
+// if matchCount is 0) for 'group', at row y - not necessarily the group's own resting row, so the
+// scroll-in transition below can use this to draw both the outgoing and incoming departure at
+// animated y offsets. Shows the stand letter ("Plads H") in place of the platform/track field
+// regular bus departures don't otherwise carry - Ejlskovsgade has no stands, so it's simply omitted
+// there. Caller is responsible for blanking/clipping - this only draws.
+void drawOdenseGroupServiceAt(int group, int *matches, int matchCount, int matchIndex, int y) {
   setSmallFont();
-  blankArea(0,y,256,9);
-
-  int matches[MAXBOARDSERVICES];
-  int matchCount = findOdenseGroupMatches(odenseGroupPrefix[group],matches);
   if (matchCount==0) {
     char msg[48];
     sprintf(msg,"%s: ingen planlagte afgange",odenseGroupPrefix[group]);
     centreMixedText(msg,y-1,u8g2_font_6x10_tf);
     return;
   }
-  if (odenseGroupIndex[group]>=matchCount) odenseGroupIndex[group] = 0;
-  rdService &svc = station.service[matches[odenseGroupIndex[group]]];
+  if (matchIndex>=matchCount) matchIndex = 0;
+  rdService &svc = station.service[matches[matchIndex]];
 
   int destPos = u8g2.drawStr(0,y-1,svc.via) + 6; // route number, e.g. "Bus 35"
   char etd[16];
@@ -3609,6 +3617,17 @@ void drawOdenseGroupLine(int group) {
   drawScrollingDestination(odenseGroupDestScroll[group],clipDestination,destPos,y-1,spaceAvailable,10,u8g2_font_6x10_tf);
 }
 
+// Static (non-animated) draw of one Odense line at its own resting row - used for the full-board
+// redraw and for ping-pong-only ticks once a line is at rest (see odenseBusLoop()). Flipping to a
+// new departure goes through the scroll-in transition in odenseBusLoop() instead of this.
+void drawOdenseGroupLine(int group) {
+  int y = odenseGroupY[group];
+  blankArea(0,y,256,9);
+  int matches[MAXBOARDSERVICES];
+  int matchCount = findOdenseGroupMatches(odenseGroupPrefix[group],matches);
+  drawOdenseGroupServiceAt(group,matches,matchCount,odenseGroupIndex[group],y);
+}
+
 // Full (re)draw of the Odense bus board: header plus all three group lines, from scratch. Called on
 // every data refresh, and once when first switching into this view.
 void drawOdenseBusBoard() {
@@ -3621,6 +3640,7 @@ void drawOdenseBusBoard() {
   for (int g=0;g<3;g++) {
     odenseGroupIndex[g] = 0;
     odenseGroupTimer[g] = millis() + 5000;
+    odenseIsScrolling[g] = false; // in case a data refresh lands mid-transition
     drawOdenseGroupLine(g);
   }
   u8g2.sendBuffer();
@@ -3659,18 +3679,40 @@ void odenseBusLoop() {
     }
   }
 
-  // Each group's line independently flips to its next departure every few seconds, and separately
-  // ping-pong scrolls its own destination if that doesn't fit (see drawScrollingDestination()).
+  // Each group's line independently flips to its next departure every few seconds - sliding the
+  // outgoing departure up and out while the incoming one slides up into its place, exactly like the
+  // rotating "other departures" line on the DK Tog board (see the matching isScrollingService block
+  // in departureBoardLoop()) - and separately ping-pong scrolls its own destination when at rest, if
+  // that doesn't fit (see drawScrollingDestination()).
   if (!isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !noDataLoaded) {
     for (int g=0;g<3;g++) {
-      bool needsRedraw = false;
-      if (millis()>=odenseGroupTimer[g]) {
-        odenseGroupIndex[g]++;
+      if (!odenseIsScrolling[g] && millis()>=odenseGroupTimer[g]) {
+        int matches[MAXBOARDSERVICES];
+        int matchCount = findOdenseGroupMatches(odenseGroupPrefix[g],matches);
+        if (matchCount>1) {
+          // Only animate a slide when there's actually a different departure to flip to.
+          odensePrevIndex[g] = odenseGroupIndex[g];
+          odenseGroupIndex[g] = (odenseGroupIndex[g]+1) % matchCount;
+          odenseScrollYpos[g] = 10;
+          odenseIsScrolling[g] = true;
+        }
         odenseGroupTimer[g] = millis() + 5000;
-        needsRedraw = true;
       }
-      if (odenseGroupDestScroll[g].active && millis()>=odenseGroupDestScroll[g].nextStep) needsRedraw = true;
-      if (needsRedraw) drawOdenseGroupLine(g);
+
+      if (odenseIsScrolling[g]) {
+        int y = odenseGroupY[g];
+        int matches[MAXBOARDSERVICES];
+        int matchCount = findOdenseGroupMatches(odenseGroupPrefix[g],matches);
+        blankArea(0,y-1,256,11);
+        u8g2.setClipWindow(0,y-1,256,y+10);
+        drawOdenseGroupServiceAt(g,matches,matchCount,odensePrevIndex[g],odenseScrollYpos[g]+y-12);
+        drawOdenseGroupServiceAt(g,matches,matchCount,odenseGroupIndex[g],odenseScrollYpos[g]+y-1);
+        u8g2.setMaxClipWindow();
+        odenseScrollYpos[g]--;
+        if (odenseScrollYpos[g]==0) odenseIsScrolling[g]=false;
+      } else if (odenseGroupDestScroll[g].active && millis()>=odenseGroupDestScroll[g].nextStep) {
+        drawOdenseGroupLine(g);
+      }
     }
   }
 
