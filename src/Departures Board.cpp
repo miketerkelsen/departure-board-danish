@@ -508,6 +508,20 @@ static int scrollPrimaryYpos = 0;
 static bool isScrollingPrimary = false;
 static bool attributionScrolled = false;
 
+// Ping-pong destination scrolling (rail board): a destination too long to fit its column slides
+// left/right to reveal the full name over time, instead of being truncated with "...". One state
+// per row position that can show a destination, so each animates/resets independently.
+struct destScrollState {
+  char text[MAXLOCATIONSIZE] = "";  // destination currently being tracked, to detect content changes
+  int offset = 0;                   // current pixel offset, 0 (showing the start) down to -maxOffset (showing the end)
+  int8_t direction = -1;            // -1 = scrolling left to reveal the end, 1 = scrolling back to the start
+  unsigned long nextStep = 0;       // millis() timestamp of the next allowed pixel step or direction change
+  bool active = false;              // true while the current text doesn't fit and needs animating
+};
+static destScrollState primaryDestScroll;   // LINE1 - the primary (1st) departure
+static destScrollState line2DestScroll;     // LINE2 - the static 2nd departure (noScrolling mode only)
+static destScrollState line3DestScroll;     // LINE3 - the rotating "other departures" slot
+
 static char displayedTime[9] = "";        // The currently displayed time
 static char currentTime[9] = "";          // The current time (keep updated in loop)
 static unsigned long lastTimeUpdate = 0;
@@ -669,6 +683,48 @@ int getMixedStringWidth(const char *text, const uint8_t *accentFont) {
     if (isAccent) u8g2.setFont(baseFont);
   }
   return width;
+}
+
+// Draws a destination name inside the box [x, x+width) at baseline y, sized for a font of the
+// given rowHeight. If it fits, drawn once, statically. If not, ping-pong scrolled left then right
+// (instead of truncated with "...") so the full name is eventually revealed, pausing briefly at
+// each end for readability. 'state' persists the animation across calls (one call per redraw of
+// the row, gated by state.nextStep so it doesn't require the caller to do its own timing) - pass
+// the same state struct every time this exact row position is redrawn, and a different one per
+// distinct row so their animations don't clash. A clip window guarantees the scrolling text can
+// never bleed into the time/track/platform text to its right (or the ordinal/time to its left).
+void drawScrollingDestination(destScrollState &state, const char *text, int x, int y, int width, int rowHeight, const uint8_t *accentFont) {
+  if (strcmp(state.text, text) != 0) {
+    // Destination changed since we last drew this row - (re)start the animation from the beginning.
+    strlcpy(state.text, text, sizeof(state.text));
+    state.offset = 0;
+    state.direction = -1;
+    state.nextStep = millis() + 1200; // pause showing the start before the first scroll begins
+  }
+  int textWidth = getMixedStringWidth(text, accentFont);
+  state.active = textWidth > width;
+  if (!state.active) {
+    drawMixedStr(x, y, text, accentFont);
+    return;
+  }
+  int maxOffset = -(textWidth - width);
+  if (millis() >= state.nextStep) {
+    state.offset += state.direction;
+    if (state.offset <= maxOffset) {
+      state.offset = maxOffset;
+      state.direction = 1;
+      state.nextStep = millis() + 1200; // pause at the end before scrolling back
+    } else if (state.offset >= 0) {
+      state.offset = 0;
+      state.direction = -1;
+      state.nextStep = millis() + 1200; // pause at the start before scrolling again
+    } else {
+      state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
+    }
+  }
+  u8g2.setClipWindow(x, y-rowHeight, x+width, y+4);
+  drawMixedStr(x+state.offset, y, text, accentFont);
+  u8g2.setMaxClipWindow();
 }
 
 // Danish modes are always drawn in the original custom fonts now - only the accented letters get
@@ -2000,15 +2056,7 @@ void drawPrimaryService(bool showVia) {
     strcpy(clipDestination,station.service[0].destination);
     if (station.service[0].serviceType == BUS) strcat(clipDestination," ~");  // Add bus icon to destination
   }
-  if (getMixedStringWidth(clipDestination,u8g2_font_6x13_tf) > spaceAvailable) {
-    while (getMixedStringWidth(clipDestination,u8g2_font_6x13_tf) > (spaceAvailable - 8)) {
-      clipDestination[strlen(clipDestination)-1] = '\0';
-    }
-    // check if there's a trailing space left
-    if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
-    strcat(clipDestination,"...");
-  }
-  drawMixedStr(destPos,LINE1-1,clipDestination,u8g2_font_6x13_tf);
+  drawScrollingDestination(primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,13,u8g2_font_6x13_tf);
   // Set font back to standard
   setSmallFont();
 }
@@ -2059,18 +2107,11 @@ void drawServiceLine(int line, int y) {
       u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat);
       spaceAvailable-=(platWidth+7);
     }
-    // work out if we need to clip the destination
     strcpy(clipDestination,station.service[line].destination);
     if (station.service[line].serviceType == BUS) strcat(clipDestination," \x86"); // Add bus icon
-    if (getMixedStringWidth(clipDestination,u8g2_font_6x10_tf) > spaceAvailable) {
-      while (getMixedStringWidth(clipDestination,u8g2_font_6x10_tf) > spaceAvailable - 5) {
-        clipDestination[strlen(clipDestination)-1] = '\0';
-      }
-      // check if there's a trailing space left
-      if (clipDestination[strlen(clipDestination)-1] == ' ') clipDestination[strlen(clipDestination)-1] = '\0';
-      strcat(clipDestination,"...");
-    }
-    drawMixedStr(destPos,y-1,clipDestination,u8g2_font_6x10_tf);
+    // LINE2 (the static 2nd departure in noScrolling mode) and LINE3 (the rotating "other
+    // departures" slot) each get their own scroll state so their animations don't clash.
+    drawScrollingDestination(y==LINE2?line2DestScroll:line3DestScroll,clipDestination,destPos,y-1,spaceAvailable,10,u8g2_font_6x10_tf);
   } else {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
@@ -3136,6 +3177,24 @@ void departureBoardLoop() {
         serviceTimer=millis()+5000;
         isScrollingService=false;
       }
+    }
+  }
+
+  // Ping-pong scroll any destination that doesn't fit its column (see drawScrollingDestination()).
+  // Each row's own state.active/state.nextStep (set the last time that row was drawn) gates this,
+  // so it's a no-op unless something actually needs animating and is due for its next step - and it
+  // deliberately skips LINE3 while isScrollingService's own scroll-in transition is still playing,
+  // picking up only once that settles into its static "resting" display.
+  if (!isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
+    if (primaryDestScroll.active && millis()>=primaryDestScroll.nextStep) {
+      drawPrimaryService(isShowingVia);
+      u8g2.updateDisplayArea(0,1,32,3);
+    }
+    if (line2DestScroll.active && millis()>=line2DestScroll.nextStep && noScrolling && station.numServices>1) {
+      drawServiceLine(1,LINE2);
+    }
+    if (line3DestScroll.active && millis()>=line3DestScroll.nextStep && !isScrollingService) {
+      drawServiceLine(line3Service,LINE3);
     }
   }
 
