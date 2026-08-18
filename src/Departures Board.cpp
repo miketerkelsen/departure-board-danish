@@ -711,6 +711,25 @@ int getMixedStringWidth(const char *text, const uint8_t *accentFont) {
   return width;
 }
 
+// Set true around the two per-frame draw calls in a slide-in transition (departureBoardLoop()'s
+// isScrollingService block, and the Odense per-group equivalent) - see drawScrollingDestination().
+static bool suppressDestScrolling = false;
+
+// Draws 'text' truncated with "..." if it doesn't fit width - no clip window, no animation state.
+// Used directly by drawScrollingDestination() when suppressDestScrolling is set, and matches
+// exactly how destinations were drawn before the ping-pong scroller existed.
+void drawTruncatedDestination(const char *text, int x, int y, int width, const uint8_t *accentFont) {
+  char buff[MAXLOCATIONSIZE+5];
+  strlcpy(buff,text,sizeof(buff));
+  if (getMixedStringWidth(buff,accentFont) > width) {
+    int i = strlen(buff);
+    while (getMixedStringWidth(buff,accentFont) > width-5 && i) buff[i--] = '\0';
+    if (i && buff[strlen(buff)-1]==' ') buff[strlen(buff)-1] = '\0';
+    strcat(buff,"...");
+  }
+  drawMixedStr(x,y,buff,accentFont);
+}
+
 // Draws a destination name inside the box [x, x+width) at baseline y, sized for a font of the
 // given rowHeight. If it fits, drawn once, statically. If not, ping-pong scrolled left then right
 // (instead of truncated with "...") so the full name is eventually revealed, pausing briefly at
@@ -719,7 +738,19 @@ int getMixedStringWidth(const char *text, const uint8_t *accentFont) {
 // the same state struct every time this exact row position is redrawn, and a different one per
 // distinct row so their animations don't clash. A clip window guarantees the scrolling text can
 // never bleed into the time/track/platform text to its right (or the ordinal/time to its left).
+//
+// While suppressDestScrolling is set (mid slide-in transition - see that flag's comment), this
+// falls back to plain truncation and never touches u8g2's clip window at all. Two clip windows
+// each trying to bound part of the same row (this function's own X-bound, and the transition's
+// Y-bound around both its draws) turned out to fight each other no matter how carefully nested/
+// restored - simplest fix is to just not have two in play at once: during a transition, the
+// transition's own single outer clip window is the only one active, unmodified and untouched by
+// this function, exactly as it worked before ping-pong scrolling was added.
 void drawScrollingDestination(destScrollState &state, const char *text, int x, int y, int width, int rowHeight, const uint8_t *accentFont) {
+  if (suppressDestScrolling) {
+    drawTruncatedDestination(text,x,y,width,accentFont);
+    return;
+  }
   if (strcmp(state.text, text) != 0) {
     // Destination changed since we last drew this row - (re)start the animation from the beginning.
     strlcpy(state.text, text, sizeof(state.text));
@@ -748,12 +779,6 @@ void drawScrollingDestination(destScrollState &state, const char *text, int x, i
       state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
     }
   }
-  // Sets its own clip window for exactly this draw, then hands clipping fully back to the caller
-  // (setMaxClipWindow) rather than trying to nest with/restore whatever the caller had - callers
-  // that need their own bound around a whole row spanning multiple draws (e.g. a scroll-in
-  // transition) must (re)establish it themselves immediately before each such draw; see the
-  // isScrollingService-style blocks that call this indirectly via drawServiceLine()/
-  // drawOdenseGroupServiceAt() for the pattern.
   int clipY0 = y-rowHeight;
   if (clipY0<0) clipY0=0;
   u8g2.setClipWindow(x,clipY0,x+width,y+4);
@@ -3200,16 +3225,15 @@ void departureBoardLoop() {
     // widen on both edges.
     blankArea(0,LINE3-1,256,11);
     if (scrollServiceYpos) {
-      // we're scrolling the service into view. Re-set the clip window immediately before EACH draw
-      // (not just once before both) - drawServiceLine() can itself narrow/reset the clip window
-      // (for its own destination-scrolling, via drawScrollingDestination()), so re-asserting the
-      // row bound here guarantees the second draw gets it too regardless of what the first left
-      // behind.
+      // we're scrolling the service into view. suppressDestScrolling makes drawServiceLine()'s own
+      // destination drawing fall back to plain truncation for these two calls, so it never touches
+      // u8g2's clip window itself - this outer window is the only one active during the transition.
       u8g2.setClipWindow(0,LINE3-1,256,LINE3+10);
+      suppressDestScrolling = true;
       // if the prev service is showing, we need to scroll it up off
       if (prevService>0) drawServiceLine(prevService,scrollServiceYpos+LINE3-12);
-      u8g2.setClipWindow(0,LINE3-1,256,LINE3+10);
       drawServiceLine(line3Service,scrollServiceYpos+LINE3-1);
+      suppressDestScrolling = false;
       u8g2.setMaxClipWindow();
       scrollServiceYpos--;
       if (scrollServiceYpos==0) {
@@ -3717,12 +3741,14 @@ void odenseBusLoop() {
         int matches[MAXBOARDSERVICES];
         int matchCount = findOdenseGroupMatches(odenseGroupPrefix[g],matches);
         blankArea(0,y-1,256,11);
-        // Re-set the clip window immediately before EACH draw (not just once before both) - see the
-        // matching comment in departureBoardLoop()'s isScrollingService block for why.
+        // suppressDestScrolling makes the destination drawing inside drawOdenseGroupServiceAt() fall
+        // back to plain truncation for these two calls - see the matching comment in
+        // departureBoardLoop()'s isScrollingService block for why.
         u8g2.setClipWindow(0,y-1,256,y+10);
+        suppressDestScrolling = true;
         drawOdenseGroupServiceAt(g,matches,matchCount,odensePrevIndex[g],odenseScrollYpos[g]+y-12);
-        u8g2.setClipWindow(0,y-1,256,y+10);
         drawOdenseGroupServiceAt(g,matches,matchCount,odenseGroupIndex[g],odenseScrollYpos[g]+y-1);
+        suppressDestScrolling = false;
         u8g2.setMaxClipWindow();
         odenseScrollYpos[g]--;
         if (odenseScrollYpos[g]==0) odenseIsScrolling[g]=false;
