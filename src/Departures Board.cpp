@@ -3038,8 +3038,15 @@ void departureBoardLoop() {
   }
 
   if (isScrollingStops && millis()>timer && !isSleeping && !noScrolling) {
-    blankArea(msgMargin,msgLine,msgWidth,9);
-    u8g2.setClipWindow(msgMargin,msgLine,SCREEN_WIDTH,msgLine+9);
+    // Widened 1px on top vs. the base font's own 9px row height: u8g2_font_6x10_tf is a 10px font,
+    // and the diacritic-topped Å/å glyph (its ring sits above where a plain "A" tops out, which is
+    // what the font's ascent metric is based on) can reach a pixel higher than that metric implies,
+    // poking above a window sized only for the base font and getting silently clipped - which read
+    // as the accented letter "sitting low" (only its lower portion stayed visible). The bottom edge
+    // is left alone: for the common case (msgLine == LINE4) it already sits exactly at the screen's
+    // bottom row.
+    blankArea(msgMargin,msgLine-1,msgWidth,10);
+    u8g2.setClipWindow(msgMargin,msgLine-1,SCREEN_WIDTH,msgLine+9);
     if (scrollStopsYpos) {
       // we're scrolling up the message initially
       // if the previous message didn't scroll then we need to scroll it up off the screen
@@ -3071,10 +3078,15 @@ void departureBoardLoop() {
   }
 
   if (isScrollingService && millis()>serviceTimer && !isSleeping && !noServiceClockIsActive) {
-    blankArea(0,LINE3,256,9);
+    // Widened 1px top and bottom vs. the base font's own 9px row height - see the matching comment
+    // above the calling-at message block for why (u8g2_font_6x10_tf's Å/å glyph can poke a pixel
+    // above a window sized only for the base font). This row has clearance on both sides (LINE2's
+    // content ends well above LINE3, and LINE4 starts well below LINE3+9), so unlike the calling-at
+    // row this one can safely widen on both edges.
+    blankArea(0,LINE3-1,256,11);
     if (scrollServiceYpos) {
       // we're scrolling the service into view
-      u8g2.setClipWindow(0,LINE3,256,LINE3+9);
+      u8g2.setClipWindow(0,LINE3-1,256,LINE3+10);
       // if the prev service is showing, we need to scroll it up off
       if (prevService>0) drawServiceLine(prevService,scrollServiceYpos+LINE3-12);
       drawServiceLine(line3Service,scrollServiceYpos+LINE3-1);
