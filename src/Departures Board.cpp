@@ -3628,11 +3628,31 @@ void busDeparturesLoop() {
 // Fills 'matches' with the indices into station.service[] whose stopArea starts with
 // 'groupPrefix' (e.g. "OBC Nord" matches both "OBC Nord Plads H" and "OBC Nord Plads I"), in the
 // order they already appear (station.service[] is time-sorted). Returns how many were found.
+// Case-insensitive substring search (avoids strcasestr, which isn't universally available).
+static bool containsCaseInsensitive(const char* haystack, const char* needle) {
+  if (!haystack[0] || !needle[0]) return false;
+  size_t hLen = strlen(haystack), nLen = strlen(needle);
+  if (nLen > hLen) return false;
+  for (size_t i=0; i<=hLen-nLen; i++) {
+    size_t j=0;
+    while (j<nLen && tolower((unsigned char)haystack[i+j])==tolower((unsigned char)needle[j])) j++;
+    if (j==nLen) return true;
+  }
+  return false;
+}
+
+// A departure whose destination is itself Odense/OBC is one terminating there rather than actually
+// going anywhere from this stand - not useful to show on a board meant to tell you where you can
+// travel to, so these are filtered out of every group.
+static bool isTerminatingAtOdense(const char *destination) {
+  return containsCaseInsensitive(destination,"Odense") || containsCaseInsensitive(destination,"OBC");
+}
+
 int findOdenseGroupMatches(const char *groupPrefix, int *matches) {
   int count = 0;
   size_t prefixLen = strlen(groupPrefix);
   for (int i=0;i<station.numServices && count<MAXBOARDSERVICES;i++) {
-    if (strncmp(station.service[i].stopArea,groupPrefix,prefixLen)==0) matches[count++] = i;
+    if (strncmp(station.service[i].stopArea,groupPrefix,prefixLen)==0 && !isTerminatingAtOdense(station.service[i].destination)) matches[count++] = i;
   }
   return count;
 }

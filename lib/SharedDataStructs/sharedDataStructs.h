@@ -5,7 +5,13 @@
 #define MAXBOARDMESSAGES 4
 #define MAXMESSAGESIZE 400
 #define MAXCALLINGSIZE 450
-#define MAXBOARDSERVICES 9
+#define MAXBOARDSERVICES 24   // was 9 - bumped for the Odense DK Bus board (odenseBusLoop() in
+                               // Departures Board.cpp), which splits departures at Odense St. three
+                               // ways (OBC Nord/OBC Syd/Ejlskovsgade) and needs enough depth per
+                               // group that a quieter one doesn't come up empty. Applies to every
+                               // mode's fetch depth, not just that one - the RAM/flash cost is small
+                               // (checked against the build's reported usage) and more departures to
+                               // rotate through is a mild improvement everywhere, not a downside.
 #define MAXLOCATIONSIZE 85
 #define MAXBUSTUBELOCATIONSIZE 50
 #define MAXFILTERSIZE 25
