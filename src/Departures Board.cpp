@@ -533,6 +533,7 @@ static destScrollState line3DestScroll;     // LINE3 - the rotating "other depar
 // other DK Bus configuration (any other stop) uses the normal busDeparturesLoop()/
 // drawBusDeparturesBoard() above, completely untouched.
 static const char* const odenseGroupPrefix[3] = {"OBC Nord","OBC Syd","Ejlskovsgade"};
+static const char* const odenseGroupLabel[3] = {"OBC N","OBC S","Ejlskovsgade"};  // abbreviated form shown on each line itself (see drawOdenseGroupServiceAt())
 static const int odenseGroupY[3] = {ULINE1,ULINE2,ULINE3};
 static int odenseGroupIndex[3] = {0,0,0};       // which match within each group's filtered list is shown
 static unsigned long odenseGroupTimer[3] = {0,0,0};
@@ -3674,10 +3675,33 @@ void drawOdenseGroupServiceAt(int group, int *matches, int matchCount, int match
   if (matchIndex>=matchCount) matchIndex = 0;
   rdService &svc = station.service[matches[matchIndex]];
 
-  int destPos = u8g2.drawStr(0,y-1,svc.via) + 6; // route number, e.g. "Bus 35"
+  // Abbreviated group location in place of "Bus" as the line's prefix, e.g. "OBC N 35" instead of
+  // "Bus 35" - identifies which of the three areas this line is even without tracking screen
+  // position, and the route number alone (without "Bus") saves space for it.
+  const char *routeNum = svc.via;
+  if (strncmp(routeNum,"Bus ",4)==0) routeNum += 4;
+  char label[24];
+  sprintf(label,"%s %s",odenseGroupLabel[group],routeNum);
+  int destPos = u8g2.drawStr(0,y-1,label) + 6;
+
+  // Scheduled time plus a "+X" delay suffix (e.g. "14:32+5") instead of "Forventet HH:MM", which
+  // took up too much space on this board. Cancelled still shows "Aflyst" plainly; on-time shows
+  // just the scheduled time with no suffix at all (no need for "Rettidig").
   char etd[16];
-  if (isDigit(svc.etd[0])) sprintf(etd,"Forventet %s",svc.etd);
-  else strcpy(etd,svc.etd);
+  if (svc.isCancelled) {
+    strcpy(etd,svc.etd); // "Aflyst"
+  } else if (isDigit(svc.etd[0])) {
+    int schedH,schedM,realH,realM;
+    sscanf(svc.sTime,"%d:%d",&schedH,&schedM);
+    sscanf(svc.etd,"%d:%d",&realH,&realM);
+    int deltaMin = (realH*60+realM) - (schedH*60+schedM);
+    if (deltaMin < -60) deltaMin += 1440; // midnight rollover
+    else if (deltaMin < 0) deltaMin = 0;  // small negative from clock drift - treat as on time
+    if (deltaMin > 0) sprintf(etd,"%s+%d",svc.sTime,deltaMin);
+    else strcpy(etd,svc.sTime);
+  } else {
+    strcpy(etd,svc.sTime); // "Rettidig" (on time) - just the scheduled time
+  }
   int etdWidth = getStringWidth(etd) + 6;
   u8g2.drawStr(SCREEN_WIDTH-etdWidth,y-1,etd);
   int spaceAvailable = SCREEN_WIDTH-destPos-etdWidth-6;
