@@ -318,6 +318,14 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define LETBANE_PRODUCTS 2048          // Rejseplanen product bitmask: bit 11 (Letbane)
 #define DKBUS_PRODUCTS 32              // Rejseplanen product bitmask: bit 5 (Bus)
 
+// DK Tog/Letbane only ever show one departure at a time (rotating through a "next departure" slot,
+// same as the UK rail/tube boards), so unlike the Odense DK Bus board's 3-way split there's no
+// benefit to fetching more than fit that display - 9 keeps the rotation from growing unwieldy long.
+// This only limits what's actually requested via the API's own maxJourneys param (see
+// rejseplanenClient::fetchDepartures()), not MAXBOARDSERVICES/service[] storage itself, which stays
+// at 24 for the Odense bus board's sake.
+#define DKRAIL_LETBANE_MAX_SERVICES 9
+
 #define ODENSE_ST_ID "8600512"         // see odenseBusLoop() for what this gates
 
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
@@ -3861,11 +3869,11 @@ void fetchDeparturesTask(void *pvParameters) {
             nextDataUpdate = millis() + BUSDATAUPDATEINTERVAL;
             break;
           case MODE_DKRAIL:
-            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,dkProducts,true,dkCallingStopId,nrTimeOffset);
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,dkProducts,true,dkCallingStopId,nrTimeOffset);
             nextDataUpdate = millis()+apiRefreshRate;
             break;
           case MODE_LETBANE:
-            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,LETBANE_PRODUCTS,false,"",0);
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,LETBANE_PRODUCTS,false,"",0);
             nextDataUpdate = millis()+apiRefreshRate;
             break;
           case MODE_DKBUS:
