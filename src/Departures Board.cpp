@@ -2098,7 +2098,12 @@ void drawPrimaryService(bool showVia) {
   char plat[9];
 
   setTallFont();
-  blankArea(0,LINE1,256,LINE2-LINE1);
+  // Widened 2px on top vs. this row's nominal bounds: with the destination scroller's clip window
+  // now spanning the full screen height (see the comment at its call below), nothing stops a glyph
+  // that renders above LINE1 (confirmed for u8g2_font_6x13_tf's Ø, which sits 2px above LINE1) from
+  // actually being drawn there - this just makes sure it also reliably gets cleared again on the
+  // next redraw, rather than leaving a ghost if the next value drawn doesn't reach that high.
+  blankArea(0,LINE1-2,256,LINE2-LINE1+2);
   destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
   if (isDigit(station.service[0].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
@@ -2123,7 +2128,15 @@ void drawPrimaryService(bool showVia) {
   // change each time, sharing one state between them was resetting the animation back to the start
   // on every single toggle - long enough that a long destination never had time to visibly move
   // before being cut back to square one, which read as permanently stuck/truncated.
-  drawScrollingDestination(showVia?primaryViaScroll:primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,u8g2_font_6x13_tf,LINE1,LINE2);
+  //
+  // clipTop/clipBottom deliberately span the full screen height here, not just this row's own
+  // bounds: several attempts at a tight vertical clip for this specific row (LINE1..LINE2) all
+  // produced a much smaller visible window than the maths predicted - something about this
+  // particular row/font/baseline combination doesn't behave the way the other rows' tight clips do,
+  // and it's not worth another guess. The only thing actually needed here is the horizontal bound
+  // (stop the scrolling text overlapping the time/track text), so give it the whole vertical range
+  // and let it be genuinely unconstrained on that axis rather than wrong.
+  drawScrollingDestination(showVia?primaryViaScroll:primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,u8g2_font_6x13_tf,0,SCREEN_HEIGHT);
   // Set font back to standard
   setSmallFont();
 }
