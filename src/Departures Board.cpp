@@ -781,7 +781,7 @@ void drawScrollingDestination(destScrollState &state, const char *text, int x, i
       state.direction = -1;
       state.nextStep = millis() + 1200; // pause at the start before scrolling again
     } else {
-      state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
+      state.nextStep = millis() + 25; // ~40px/sec while actively scrolling
     }
   }
   u8g2.setClipWindow(x,clipTop,x+width,clipBottom);
