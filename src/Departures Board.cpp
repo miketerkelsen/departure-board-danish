@@ -731,14 +731,18 @@ void drawTruncatedDestination(const char *text, int x, int y, int width, const u
   drawMixedStr(x,y,buff,accentFont);
 }
 
-// Draws a destination name inside the box [x, x+width) at baseline y, sized for a font of the
-// given rowHeight. If it fits, drawn once, statically. If not, ping-pong scrolled left then right
-// (instead of truncated with "...") so the full name is eventually revealed, pausing briefly at
-// each end for readability. 'state' persists the animation across calls (one call per redraw of
-// the row, gated by state.nextStep so it doesn't require the caller to do its own timing) - pass
-// the same state struct every time this exact row position is redrawn, and a different one per
-// distinct row so their animations don't clash. A clip window guarantees the scrolling text can
-// never bleed into the time/track/platform text to its right (or the ordinal/time to its left).
+// Draws a destination name inside the box [x, x+width) at baseline y, clipped vertically to
+// [clipTop, clipBottom) - pass the row's own actual bounds (matching exactly what the caller's own
+// blankArea() clears), not a margin guessed from the font size: a earlier version derived the clip
+// from "y minus an assumed row height" plus a small fixed margin, which for the primary line's
+// combination of font/baseline shrank the effective window to just a few pixels tall, cutting off
+// most of every character rather than fixing the one glyph (Ø) it was meant to contain. If it fits,
+// drawn once, statically. If not, ping-pong scrolled left then right (instead of truncated with
+// "...") so the full name is eventually revealed, pausing briefly at each end for readability.
+// 'state' persists the animation across calls (one call per redraw of the row, gated by
+// state.nextStep so it doesn't require the caller to do its own timing) - pass the same state
+// struct every time this exact row position is redrawn, and a different one per distinct row so
+// their animations don't clash.
 //
 // While suppressDestScrolling is set (mid slide-in transition - see that flag's comment), this
 // falls back to plain truncation and never touches u8g2's clip window at all. Two clip windows
@@ -747,7 +751,7 @@ void drawTruncatedDestination(const char *text, int x, int y, int width, const u
 // restored - simplest fix is to just not have two in play at once: during a transition, the
 // transition's own single outer clip window is the only one active, unmodified and untouched by
 // this function, exactly as it worked before ping-pong scrolling was added.
-void drawScrollingDestination(destScrollState &state, const char *text, int x, int y, int width, int rowHeight, const uint8_t *accentFont, int clipTop = 0) {
+void drawScrollingDestination(destScrollState &state, const char *text, int x, int y, int width, const uint8_t *accentFont, int clipTop, int clipBottom) {
   if (suppressDestScrolling) {
     drawTruncatedDestination(text,x,y,width,accentFont);
     return;
@@ -780,16 +784,7 @@ void drawScrollingDestination(destScrollState &state, const char *text, int x, i
       state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
     }
   }
-  // clipTop guards against a specific glyph rendering higher than the row it's meant to stay
-  // within: e.g. u8g2_font_6x13_tf's Ø sits 2px above where this row's own blankArea() starts
-  // clearing from (confirmed by decoding its actual per-glyph height/y-offset), so without this the
-  // clip window (y-rowHeight, clamped only at 0) would happily let it draw into that uncleared
-  // strip - and once the content changes to something that doesn't reach that high, those pixels
-  // never get wiped, leaving a permanent ghost. Callers whose row doesn't start at the top of the
-  // screen should pass their row's own top edge here.
-  int clipY0 = y-rowHeight;
-  if (clipY0<clipTop) clipY0=clipTop;
-  u8g2.setClipWindow(x,clipY0,x+width,y+4);
+  u8g2.setClipWindow(x,clipTop,x+width,clipBottom);
   drawMixedStr(x+state.offset, y, text, accentFont);
   u8g2.setMaxClipWindow();
 }
@@ -2128,7 +2123,7 @@ void drawPrimaryService(bool showVia) {
   // change each time, sharing one state between them was resetting the animation back to the start
   // on every single toggle - long enough that a long destination never had time to visibly move
   // before being cut back to square one, which read as permanently stuck/truncated.
-  drawScrollingDestination(showVia?primaryViaScroll:primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,13,u8g2_font_6x13_tf,LINE1);
+  drawScrollingDestination(showVia?primaryViaScroll:primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,u8g2_font_6x13_tf,LINE1,LINE2);
   // Set font back to standard
   setSmallFont();
 }
@@ -2183,7 +2178,7 @@ void drawServiceLine(int line, int y) {
     if (station.service[line].serviceType == BUS) strcat(clipDestination," \x86"); // Add bus icon
     // LINE2 (the static 2nd departure in noScrolling mode) and LINE3 (the rotating "other
     // departures" slot) each get their own scroll state so their animations don't clash.
-    drawScrollingDestination(y==LINE2?line2DestScroll:line3DestScroll,clipDestination,destPos,y-1,spaceAvailable,10,u8g2_font_6x10_tf);
+    drawScrollingDestination(y==LINE2?line2DestScroll:line3DestScroll,clipDestination,destPos,y-1,spaceAvailable,u8g2_font_6x10_tf,y,y+9);
   } else {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
@@ -3665,7 +3660,7 @@ void drawOdenseGroupServiceAt(int group, int *matches, int matchCount, int match
 
   char clipDestination[MAXLOCATIONSIZE+5];
   strcpy(clipDestination,svc.destination);
-  drawScrollingDestination(odenseGroupDestScroll[group],clipDestination,destPos,y-1,spaceAvailable,10,u8g2_font_6x10_tf);
+  drawScrollingDestination(odenseGroupDestScroll[group],clipDestination,destPos,y-1,spaceAvailable,u8g2_font_6x10_tf,y,y+9);
 }
 
 // Static (non-animated) draw of one Odense line at its own resting row - used for the full-board
