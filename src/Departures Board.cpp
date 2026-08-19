@@ -520,7 +520,8 @@ struct destScrollState {
   unsigned long nextStep = 0;       // millis() timestamp of the next allowed pixel step or direction change
   bool active = false;              // true while the current text doesn't fit and needs animating
 };
-static destScrollState primaryDestScroll;   // LINE1 - the primary (1st) departure
+static destScrollState primaryDestScroll;   // LINE1 - the primary (1st) departure's destination
+static destScrollState primaryViaScroll;    // LINE1 - the primary (1st) departure's "via" text (see drawPrimaryService())
 static destScrollState line2DestScroll;     // LINE2 - the static 2nd departure (noScrolling mode only)
 static destScrollState line3DestScroll;     // LINE3 - the rotating "other departures" slot
 
@@ -746,7 +747,7 @@ void drawTruncatedDestination(const char *text, int x, int y, int width, const u
 // restored - simplest fix is to just not have two in play at once: during a transition, the
 // transition's own single outer clip window is the only one active, unmodified and untouched by
 // this function, exactly as it worked before ping-pong scrolling was added.
-void drawScrollingDestination(destScrollState &state, const char *text, int x, int y, int width, int rowHeight, const uint8_t *accentFont) {
+void drawScrollingDestination(destScrollState &state, const char *text, int x, int y, int width, int rowHeight, const uint8_t *accentFont, int clipTop = 0) {
   if (suppressDestScrolling) {
     drawTruncatedDestination(text,x,y,width,accentFont);
     return;
@@ -779,8 +780,15 @@ void drawScrollingDestination(destScrollState &state, const char *text, int x, i
       state.nextStep = millis() + 40; // ~25px/sec while actively scrolling
     }
   }
+  // clipTop guards against a specific glyph rendering higher than the row it's meant to stay
+  // within: e.g. u8g2_font_6x13_tf's Ø sits 2px above where this row's own blankArea() starts
+  // clearing from (confirmed by decoding its actual per-glyph height/y-offset), so without this the
+  // clip window (y-rowHeight, clamped only at 0) would happily let it draw into that uncleared
+  // strip - and once the content changes to something that doesn't reach that high, those pixels
+  // never get wiped, leaving a permanent ghost. Callers whose row doesn't start at the top of the
+  // screen should pass their row's own top edge here.
   int clipY0 = y-rowHeight;
-  if (clipY0<0) clipY0=0;
+  if (clipY0<clipTop) clipY0=clipTop;
   u8g2.setClipWindow(x,clipY0,x+width,y+4);
   drawMixedStr(x+state.offset, y, text, accentFont);
   u8g2.setMaxClipWindow();
@@ -2115,7 +2123,12 @@ void drawPrimaryService(bool showVia) {
     strcpy(clipDestination,station.service[0].destination);
     if (station.service[0].serviceType == BUS) strcat(clipDestination," ~");  // Add bus icon to destination
   }
-  drawScrollingDestination(primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,13,u8g2_font_6x13_tf);
+  // Separate scroll state for "via" vs destination - drawPrimaryService() toggles between the two
+  // every few seconds (see viaTimer in departureBoardLoop()), and since that's a genuine content
+  // change each time, sharing one state between them was resetting the animation back to the start
+  // on every single toggle - long enough that a long destination never had time to visibly move
+  // before being cut back to square one, which read as permanently stuck/truncated.
+  drawScrollingDestination(showVia?primaryViaScroll:primaryDestScroll,clipDestination,destPos,LINE1-1,spaceAvailable,13,u8g2_font_6x13_tf,LINE1);
   // Set font back to standard
   setSmallFont();
 }
@@ -3249,7 +3262,8 @@ void departureBoardLoop() {
   // deliberately skips LINE3 while isScrollingService's own scroll-in transition is still playing,
   // picking up only once that settles into its static "resting" display.
   if (!isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
-    if (primaryDestScroll.active && millis()>=primaryDestScroll.nextStep) {
+    destScrollState &activePrimaryScroll = isShowingVia ? primaryViaScroll : primaryDestScroll;
+    if (activePrimaryScroll.active && millis()>=activePrimaryScroll.nextStep) {
       drawPrimaryService(isShowingVia);
       u8g2.updateDisplayArea(0,1,32,3);
     }
