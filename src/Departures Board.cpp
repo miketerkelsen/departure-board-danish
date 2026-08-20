@@ -508,6 +508,14 @@ static int scrollServiceYpos = 0;
 static bool isScrollingService = false;
 static int prevService = 0;
 static bool isShowingVia=false;
+
+// "Train departed" animation on the primary line - see the trigger block in departureBoardLoop()
+// for how "departed" is inferred (there's no such field in the data itself).
+static bool trainDepartedAnimating = false;
+static int trainDepartedXpos = 0;
+static char trainDepartedFingerprint[64] = ""; // identifies the departure that last played the
+  // animation (sTime+destination, the closest thing to a stable id this data has), so it only
+  // plays once per departure rather than every frame while it lingers as service[0]
 static unsigned long serviceTimer=0;
 static unsigned long viaTimer=0;
 static unsigned long letbaneBlinkTimer=0;
@@ -2099,6 +2107,24 @@ bool checkForFirmwareUpdate() {
  * Station Board functions - pulling updates and animating the Departures Board main display
  */
 
+// Draws a small stylised train at (x,y) - two body cars joined by short coupling lines, then a
+// nosed front car - used by the "departed" animation (see the trigger block in
+// departureBoardLoop()). Pure line-drawing primitives rather than a font glyph, since there's no
+// source to add a new character to the hand-built fonts from.
+void drawTrainIcon(int x, int y) {
+  const int carW=10, carH=8, gap=3;
+  int cx = x;
+  for (int i=0;i<2;i++) {
+    u8g2.drawBox(cx,y,carW,carH);
+    cx += carW;
+    u8g2.drawHLine(cx,y+carH/2,gap); // coupling between cars
+    cx += gap;
+  }
+  u8g2.drawBox(cx,y,carW,carH);
+  cx += carW;
+  u8g2.drawTriangle(cx,y, cx,y+carH-1, cx+carH/2,y+carH/2); // pointed nose on the leading edge
+}
+
 // Draw the primary service line
 void drawPrimaryService(bool showVia) {
   int destPos;
@@ -3113,7 +3139,7 @@ void departureBoardLoop() {
 
   if (fetchComplete && updateIconVisible) showUpdateIcon(false);
 
-  if (fetchComplete && lastUpdateResult == UPD_SEC_CHANGE && !isScrollingService && !isSleeping) {
+  if (fetchComplete && lastUpdateResult == UPD_SEC_CHANGE && !isScrollingService && !isSleeping && !trainDepartedAnimating) {
     fetchComplete = false;
     updateRailDepartures();
     if (station.numServices) {
@@ -3135,7 +3161,7 @@ void departureBoardLoop() {
     }
   }
 
-  if (fetchComplete && lastUpdateResult != UPD_SEC_CHANGE && !isScrollingService && !isSleeping) {
+  if (fetchComplete && lastUpdateResult != UPD_SEC_CHANGE && !isScrollingService && !isSleeping && !trainDepartedAnimating) {
     if (!isScrollingStops || (!showFullCalling && isShowingCalling) || (!showFullMsgs && !isShowingCalling)) {
       fetchComplete = false;
       // Get the update data if there is any
@@ -3175,7 +3201,7 @@ void departureBoardLoop() {
 
   // Check if there's a via destination
   if (millis()>viaTimer) {
-    if (station.numServices && station.service[0].via[0] && !isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
+    if (station.numServices && station.service[0].via[0] && !isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !trainDepartedAnimating) {
       isShowingVia = !isShowingVia;
       drawPrimaryService(isShowingVia);
       u8g2.updateDisplayArea(0,1,32,3);
@@ -3280,7 +3306,7 @@ void departureBoardLoop() {
   // picking up only once that settles into its static "resting" display.
   if (!isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
     destScrollState &activePrimaryScroll = isShowingVia ? primaryViaScroll : primaryDestScroll;
-    if (activePrimaryScroll.active && millis()>=activePrimaryScroll.nextStep) {
+    if (!trainDepartedAnimating && activePrimaryScroll.active && millis()>=activePrimaryScroll.nextStep) {
       drawPrimaryService(isShowingVia);
       u8g2.updateDisplayArea(0,1,32,3);
     }
@@ -3289,6 +3315,44 @@ void departureBoardLoop() {
     }
     if (line3DestScroll.active && millis()>=line3DestScroll.nextStep && !isScrollingService) {
       drawServiceLine(line3Service,LINE3);
+    }
+  }
+
+  // "Train departed" animation trigger: there's no "has departed" field in this data (checked the
+  // actual API schema), so this is inferred the same way everything else here that needs a "how
+  // long until/since" figure does - comparing the departure's own time (realtime if present, else
+  // scheduled) against the board's clock, same pattern as the Letbane countdown in
+  // drawUndergroundService(). Only triggers once per departure (trainDepartedFingerprint), not
+  // every frame while a passed time lingers in service[0] waiting for the next fetch to drop it.
+  if (!trainDepartedAnimating && !isSleeping && station.numServices && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !station.service[0].isCancelled) {
+    const char *effTime = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
+    int h=0,m=0;
+    sscanf(effTime,"%d:%d",&h,&m);
+    int deltaMin = (h*60+m) - getTimeInMinutes();
+    if (deltaMin < -60) deltaMin += 1440; // midnight rollover - actually tomorrow's early departure, not overdue
+    char fingerprint[64];
+    snprintf(fingerprint,sizeof(fingerprint),"%s|%s",station.service[0].sTime,station.service[0].destination);
+    if (deltaMin <= 0 && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
+      strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
+      trainDepartedAnimating = true;
+      trainDepartedXpos = 0;
+    }
+  }
+
+  if (trainDepartedAnimating) {
+    // Same widened bounds as drawPrimaryService()'s own blankArea(), so nothing this icon draws can
+    // linger uncleared for the same reason Ø once did there.
+    blankArea(0,LINE1-2,256,LINE2-LINE1+2);
+    drawTrainIcon(trainDepartedXpos,LINE1+3);
+    u8g2.updateDisplayArea(0,1,32,3);
+    trainDepartedXpos += 6; // ~240px/sec at this loop's ~40fps pace - crosses the screen in about a second
+    if (trainDepartedXpos > SCREEN_WIDTH) {
+      trainDepartedAnimating = false;
+      // Hand straight back to normal rendering rather than waiting for one of the gates above to
+      // next fire on its own timer, so there's no blank gap between the icon leaving and the next
+      // departure appearing.
+      drawPrimaryService(isShowingVia);
+      u8g2.updateDisplayArea(0,1,32,3);
     }
   }
 
