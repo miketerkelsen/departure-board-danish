@@ -2107,22 +2107,36 @@ bool checkForFirmwareUpdate() {
  * Station Board functions - pulling updates and animating the Departures Board main display
  */
 
-// Draws a small stylised train at (x,y) - two body cars joined by short coupling lines, then a
-// nosed front car - used by the "departed" animation (see the trigger block in
-// departureBoardLoop()). Pure line-drawing primitives rather than a font glyph, since there's no
-// source to add a new character to the hand-built fonts from.
+// Draws a small stylised train at (x,y), side-on - two body cars with plain empty space between
+// them, then a front car whose nose tapers from the roofline down to a point level with the
+// bottom, like a real locomotive viewed from the side. Used by the "departed" animation (see the
+// trigger block in departureBoardLoop()). Pure line-drawing primitives rather than a font glyph,
+// since there's no source to add a new character to the hand-built fonts from.
 void drawTrainIcon(int x, int y) {
-  const int carW=10, carH=8, gap=3;
+  const int carW=10, carH=8, gap=4;
   int cx = x;
   for (int i=0;i<2;i++) {
     u8g2.drawBox(cx,y,carW,carH);
-    cx += carW;
-    u8g2.drawHLine(cx,y+carH/2,gap); // coupling between cars
-    cx += gap;
+    cx += carW+gap;
   }
   u8g2.drawBox(cx,y,carW,carH);
   cx += carW;
-  u8g2.drawTriangle(cx,y, cx,y+carH-1, cx+carH/2,y+carH/2); // pointed nose on the leading edge
+  u8g2.drawTriangle(cx,y, cx,y+carH-1, cx+carH,y+carH-1);
+}
+
+// Shifts station.service[] down by one slot, as if the just-departed train had already dropped off
+// the list - used once the "departed" animation finishes (departureBoardLoop()), since the next
+// real data fetch may not have landed by then and simply redrawing service[0] again would show the
+// very departure that just animated away, looking like nothing happened. A plain struct copy is
+// safe here (rdService has no pointers/dynamic members); this is only ever a temporary bridge until
+// the next real fetch overwrites station wholesale and re-establishes ground truth.
+void promoteNextService() {
+  if (station.numServices > 1) {
+    for (int i=0;i<station.numServices-1;i++) station.service[i] = station.service[i+1];
+    station.numServices--;
+  } else if (station.numServices == 1) {
+    station.numServices = 0;
+  }
 }
 
 // Draw the primary service line
@@ -3322,8 +3336,11 @@ void departureBoardLoop() {
   // actual API schema), so this is inferred the same way everything else here that needs a "how
   // long until/since" figure does - comparing the departure's own time (realtime if present, else
   // scheduled) against the board's clock, same pattern as the Letbane countdown in
-  // drawUndergroundService(). Only triggers once per departure (trainDepartedFingerprint), not
-  // every frame while a passed time lingers in service[0] waiting for the next fetch to drop it.
+  // drawUndergroundService(). Waits a full minute past the departure time (not the instant it
+  // passes) before triggering, giving the next real data fetch a bit of a head start - reduces (but
+  // doesn't guarantee, see promoteNextService() below) the odds it hasn't caught up yet by the time
+  // the animation ends. Only triggers once per departure (trainDepartedFingerprint), not every
+  // frame while a passed time lingers in service[0] waiting for the next fetch to drop it.
   if (!trainDepartedAnimating && !isSleeping && station.numServices && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !station.service[0].isCancelled) {
     const char *effTime = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
     int h=0,m=0;
@@ -3332,7 +3349,7 @@ void departureBoardLoop() {
     if (deltaMin < -60) deltaMin += 1440; // midnight rollover - actually tomorrow's early departure, not overdue
     char fingerprint[64];
     snprintf(fingerprint,sizeof(fingerprint),"%s|%s",station.service[0].sTime,station.service[0].destination);
-    if (deltaMin <= 0 && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
+    if (deltaMin <= -1 && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
@@ -3348,11 +3365,16 @@ void departureBoardLoop() {
     trainDepartedXpos += 6; // ~240px/sec at this loop's ~40fps pace - crosses the screen in about a second
     if (trainDepartedXpos > SCREEN_WIDTH) {
       trainDepartedAnimating = false;
-      // Hand straight back to normal rendering rather than waiting for one of the gates above to
-      // next fire on its own timer, so there's no blank gap between the icon leaving and the next
-      // departure appearing.
-      drawPrimaryService(isShowingVia);
-      u8g2.updateDisplayArea(0,1,32,3);
+      // A real data refresh may not have landed by now, in which case service[0] is still the very
+      // departure that just animated away - drawing it again would look like the animation did
+      // nothing. Locally shift the list down one slot instead of waiting on the network, same as
+      // Rejseplanen/National Rail will themselves do on the next real fetch.
+      promoteNextService();
+      if (station.numServices) {
+        if (!station.service[0].via[0]) isShowingVia = false;
+        drawPrimaryService(isShowingVia);
+        u8g2.updateDisplayArea(0,1,32,3);
+      }
     }
   }
 
