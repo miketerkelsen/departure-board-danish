@@ -2113,15 +2113,24 @@ bool checkForFirmwareUpdate() {
 // trigger block in departureBoardLoop()). Pure line-drawing primitives rather than a font glyph,
 // since there's no source to add a new character to the hand-built fonts from.
 void drawTrainIcon(int x, int y) {
-  const int carW=10, carH=8, gap=1, noseLen=4;
+  const int carW=10, carH=8, noseLen=4, r=2;
   int cx = x;
+  // No gap at all between cars - the rounded corners (drawRBox, not drawBox) recess slightly at
+  // each seam on their own, giving visual separation without needing an actual pixel of space.
   for (int i=0;i<2;i++) {
-    u8g2.drawBox(cx,y,carW,carH);
-    cx += carW+gap;
+    u8g2.drawRBox(cx,y,carW,carH,r);
+    cx += carW;
   }
-  u8g2.drawBox(cx,y,carW,carH);
+  u8g2.drawRBox(cx,y,carW,carH,r);
   cx += carW;
-  u8g2.drawTriangle(cx,y, cx,y+carH-1, cx+noseLen,y+carH-1);
+  // Nose drawn as a bottom-anchored staircase of vertical lines, not drawTriangle - its bottom edge
+  // was landing 1px short of the cars' own bottom row (rasteriser fill-convention quirk with an
+  // exact horizontal edge), and a manual per-column line guarantees every column, including the
+  // last, actually reaches y+carH-1.
+  for (int i=0;i<noseLen;i++) {
+    int h = carH - (i*(carH-1))/(noseLen-1);
+    u8g2.drawVLine(cx+i,y+carH-h,h);
+  }
 }
 
 // Shifts station.service[] down by one slot, as if the just-departed train had already dropped off
