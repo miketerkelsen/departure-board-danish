@@ -2113,7 +2113,7 @@ bool checkForFirmwareUpdate() {
 // trigger block in departureBoardLoop()). Pure line-drawing primitives rather than a font glyph,
 // since there's no source to add a new character to the hand-built fonts from.
 void drawTrainIcon(int x, int y) {
-  const int carW=10, carH=8, gap=4;
+  const int carW=10, carH=8, gap=1, noseLen=4;
   int cx = x;
   for (int i=0;i<2;i++) {
     u8g2.drawBox(cx,y,carW,carH);
@@ -2121,7 +2121,7 @@ void drawTrainIcon(int x, int y) {
   }
   u8g2.drawBox(cx,y,carW,carH);
   cx += carW;
-  u8g2.drawTriangle(cx,y, cx,y+carH-1, cx+carH,y+carH-1);
+  u8g2.drawTriangle(cx,y, cx,y+carH-1, cx+noseLen,y+carH-1);
 }
 
 // Shifts station.service[] down by one slot, as if the just-departed train had already dropped off
