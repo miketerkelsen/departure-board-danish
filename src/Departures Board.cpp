@@ -2112,21 +2112,30 @@ bool checkForFirmwareUpdate() {
 // bottom, like a real locomotive viewed from the side. Used by the "departed" animation (see the
 // trigger block in departureBoardLoop()). Pure line-drawing primitives rather than a font glyph,
 // since there's no source to add a new character to the hand-built fonts from.
+// Clears whichever of a w x h box's 4 corner pixels are requested, giving a light 1px-rounded look
+// on just those corners - u8g2's own drawRBox() only rounds all 4 uniformly, with no way to pick
+// individual ones.
+// Clears an L-shaped r x r notch (keeping the innermost diagonal pixel(s), so it reads as a curve
+// rather than a straight diagonal chop) at whichever corners of a w x h box are requested - u8g2's
+// own drawRBox() only rounds all 4 corners uniformly, with no way to pick individual ones.
+// Starting over with something plain and simple, built entirely from u8g2's own tested primitives
+// (drawRBox/drawTriangle) rather than hand-rolled corner-pixel math - that approach went through
+// several rounds without landing on something that actually looked right, and kept introducing new
+// bugs of its own. Three identical rounded cars, uniformly rounded on all four corners (no
+// per-corner logic to get wrong), then a plain triangular nose. Tune carW/carH/gap/noseLen/r here.
 void drawTrainIcon(int x, int y) {
-  const int carW=10, carH=8, noseLen=4, r=2;
+  const int carW=9, carH=8, gap=1, noseLen=5;
   int cx = x;
-  // No gap at all between cars - the rounded corners (drawRBox, not drawBox) recess slightly at
-  // each seam on their own, giving visual separation without needing an actual pixel of space.
-  for (int i=0;i<2;i++) {
-    u8g2.drawRBox(cx,y,carW,carH,r);
-    cx += carW;
+  // Three plain sharp-cornered rectangles, 1px gap between each.
+  for (int i=0;i<3;i++) {
+    u8g2.drawBox(cx,y,carW,carH);
+    cx += carW+gap;
   }
-  u8g2.drawRBox(cx,y,carW,carH,r);
-  cx += carW;
-  // Nose drawn as a bottom-anchored staircase of vertical lines, not drawTriangle - its bottom edge
-  // was landing 1px short of the cars' own bottom row (rasteriser fill-convention quirk with an
-  // exact horizontal edge), and a manual per-column line guarantees every column, including the
-  // last, actually reaches y+carH-1.
+  cx -= gap; // the nose sits flush against the front rectangle, no gap before it
+  // Built one column at a time rather than drawTriangle() - on real hardware that left the bottom
+  // row 1px short of the rectangles' own bottom edge, so the point never actually sat flush. Each
+  // column here is its own bottom-anchored vertical line, which guarantees every one of them,
+  // including the last, reaches exactly the same bottom row as the three rectangles.
   for (int i=0;i<noseLen;i++) {
     int h = carH - (i*(carH-1))/(noseLen-1);
     u8g2.drawVLine(cx+i,y+carH-h,h);
