@@ -317,6 +317,7 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 
 #define LETBANE_PRODUCTS 2048          // Rejseplanen product bitmask: bit 11 (Letbane)
 #define DKBUS_PRODUCTS 32              // Rejseplanen product bitmask: bit 5 (Bus)
+#define STOG_PRODUCTS 16               // Rejseplanen product bitmask: bit 4 (S-tog) - MODE_STOG's dedicated board is always S-tog-only
 
 // DK Tog/Letbane only ever show one departure at a time (rotating through a "next departure" slot,
 // same as the UK rail/tube boards), so unlike the Odense DK Bus board's 3-way split there's no
@@ -440,6 +441,7 @@ static bool busIsSet = false;
 static bool dkRailIsSet = false;
 static bool letbaneIsSet = false;
 static bool dkBusIsSet = false;
+static bool stogIsSet = false;
 static bool schedulerActive = false;
 static bool carouselActive = false;
 static int activeSlotEventTime;
@@ -468,7 +470,8 @@ enum boardModes {
   MODE_BUS = 2,
   MODE_DKRAIL = 3,
   MODE_LETBANE = 4,
-  MODE_DKBUS = 5
+  MODE_DKBUS = 5,
+  MODE_STOG = 6
 };
 boardModes boardMode = MODE_RAIL;
 
@@ -624,6 +627,36 @@ int getStringWidth(const char *message) {
 // content) draws identically to plain drawStr()/getStrWidth() - this is a no-op passthrough.
 static bool isDanishAccentByte(unsigned char c) {
   return c==0xE6 || c==0xF8 || c==0xE5 || c==0xC6 || c==0xD8 || c==0xC5; // æ ø å Æ Ø Å
+}
+
+// Rejseplanen API text (destination/via/stopArea/calling-point names) already arrives converted to
+// this single-byte Latin-1 form - see rejseplanenClient::convertDanishToLatin1() and its comment.
+// But a station's *friendly name* for the Danish modes (e.g. "dkName"/"letbaneName"/"stogName") is
+// typed by hand into the web config form, which submits as UTF-8 - so "København" arrives here as
+// the two-byte UTF-8 sequence 0xC3 0xA6/0xB8/... rather than the single Latin-1 byte
+// isDanishAccentByte() checks for, and the header silently dropped those letters. Same conversion as
+// the client's, just a free-standing copy since that one is a private class method. Idempotent - a
+// string with no UTF-8 lead bytes (e.g. one already Latin-1, or plain ASCII) passes through unchanged.
+static void convertDanishToLatin1(char* input, size_t maxLen) {
+  if (!input || !input[0]) return;
+  char output[MAXLOCATIONSIZE*2];
+  size_t outPos = 0;
+  size_t len = strlen(input);
+  for (size_t i=0; i<len && outPos < sizeof(output)-1;) {
+    unsigned char c = (unsigned char)input[i];
+    if (c == 0xC3 && i+1 < len) {
+      unsigned char c2 = (unsigned char)input[i+1];
+      if (c2 >= 0x80 && c2 <= 0xBF) {
+        output[outPos++] = (char)(unsigned char)(0xC0 | (c2 & 0x3F));
+        i += 2;
+        continue;
+      }
+    }
+    output[outPos++] = input[i];
+    i++;
+  }
+  output[outPos] = '\0';
+  strlcpy(input, output, maxLen);
 }
 
 // u8g2 internals not exposed via the public U8g2lib.h/u8g2.h API, needed below to read a specific
@@ -950,7 +983,7 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
     int const dateY=55;
     // Get the date
     char sysTime[29];
-    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS) {
+    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS || boardMode==MODE_STOG) {
       sprintf(sysTime,"%s %02d %s",dkWeekdayShort[timeinfo.tm_wday],timeinfo.tm_mday,dkMonthShort[timeinfo.tm_mon]);
     } else {
       strftime(sysTime,29,"%a %d %b",&timeinfo);
@@ -1107,7 +1140,7 @@ void drawSleepingScreen() {
   u8g2.clearBuffer();
   if (sleepClock) {
     sprintf(sysTime,"%02d:%02d",timeinfo.tm_hour,timeinfo.tm_min);
-    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS) {
+    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS || boardMode==MODE_STOG) {
       sprintf(sysDate,"%d. %s %d",timeinfo.tm_mday,dkMonthLong[timeinfo.tm_mon],timeinfo.tm_year+1900);
     } else {
       strftime(sysDate,29,"%d %B %Y",&timeinfo);
@@ -1186,6 +1219,7 @@ void showNoDataScreen() {
       strcpy(msg,"No data available for the selected letbane stop.");
       break;
     case MODE_DKBUS:
+    case MODE_STOG:
       sprintf(msg,"No data available for stop id \"%s\".",locationCode);
       break;
   }
@@ -1257,6 +1291,7 @@ void showTokenErrorScreen() {
     case MODE_DKRAIL:
     case MODE_LETBANE:
     case MODE_DKBUS:
+    case MODE_STOG:
       centreText("Access to the Rejseplanen database denied.",-1);
       break;
   }
@@ -1286,6 +1321,7 @@ void showCRSErrorScreen() {
     case MODE_DKRAIL:
     case MODE_LETBANE:
     case MODE_DKBUS:
+    case MODE_STOG:
       sprintf(msg,"The Rejseplanen stop id \"%s\" is not valid.",locationCode);
       break;
   }
@@ -1506,6 +1542,7 @@ void resetLocationIds() {
   dkRailIsSet = false;
   letbaneIsSet = false;
   dkBusIsSet = false;
+  stogIsSet = false;
 }
 
 void saveFirmwareInfo() {
@@ -1538,7 +1575,7 @@ int getTimeInMinutes() {
 
 void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
   if (requestedMode == MODE_NEXTMODE) {
-    // Circular order: RAIL -> TUBE -> BUS -> DKRAIL -> LETBANE -> DKBUS -> (back to RAIL)
+    // Circular order: RAIL -> TUBE -> BUS -> DKRAIL -> LETBANE -> DKBUS -> STOG -> (back to RAIL)
     switch (boardMode) {
       case MODE_RAIL:
         if (tubeIsSet) boardMode = MODE_TUBE;
@@ -1546,41 +1583,55 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (stogIsSet) boardMode = MODE_STOG;
         break;
       case MODE_TUBE:
         if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (stogIsSet) boardMode = MODE_STOG;
         else if (railIsSet) boardMode = MODE_RAIL;
         break;
       case MODE_BUS:
         if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (stogIsSet) boardMode = MODE_STOG;
         else if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         break;
       case MODE_DKRAIL:
         if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (stogIsSet) boardMode = MODE_STOG;
         else if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         else if (busIsSet) boardMode = MODE_BUS;
         break;
       case MODE_LETBANE:
         if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (stogIsSet) boardMode = MODE_STOG;
         else if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         else if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         break;
       case MODE_DKBUS:
+        if (stogIsSet) boardMode = MODE_STOG;
+        else if (railIsSet) boardMode = MODE_RAIL;
+        else if (tubeIsSet) boardMode = MODE_TUBE;
+        else if (busIsSet) boardMode = MODE_BUS;
+        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        break;
+      case MODE_STOG:
         if (railIsSet) boardMode = MODE_RAIL;
         else if (tubeIsSet) boardMode = MODE_TUBE;
         else if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         break;
     }
   } else {
@@ -1644,6 +1695,8 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
         if (slot["lat"].is<float>())                  locationLat = slot["lat"];
         if (slot["lon"].is<float>())                  locationLon = slot["lon"];
       }
+      convertDanishToLatin1(locationName, sizeof(locationName));
+      convertDanishToLatin1(callingStation, sizeof(callingStation));
       break;
 
     case MODE_LETBANE:
@@ -1657,6 +1710,7 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
         if (slot["lat"].is<float>())          locationLat = slot["lat"];
         if (slot["lon"].is<float>())          locationLon = slot["lon"];
       }
+      convertDanishToLatin1(locationName, sizeof(locationName));
       break;
 
     case MODE_DKBUS:
@@ -1670,6 +1724,25 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
         if (slot["lat"].is<float>())          locationLat = slot["lat"];
         if (slot["lon"].is<float>())          locationLon = slot["lon"];
       }
+      convertDanishToLatin1(locationName, sizeof(locationName));
+      break;
+
+    case MODE_STOG:
+      // Dedicated S-tog board - reuses the DK Rail rail-style rendering pipeline entirely (see
+      // useSTogStyle()), just with its own location slot (so it can be configured independently of,
+      // and alongside, a MODE_DKRAIL location - e.g. DK Tog at Odense plus S-tog at København H)
+      // and a fetch that's always S-tog-only (see fetchDeparturesTask()'s MODE_STOG case).
+      if (slot["stogId"].is<const char*>())  strlcpy(locationCode, slot["stogId"], sizeof(locationCode));
+      if (isDefault) {
+        if (slot["stogName"].is<const char*>()) strlcpy(locationName, slot["stogName"], sizeof(locationName));
+        if (slot["stogLat"].is<float>())         locationLat = slot["stogLat"];
+        if (slot["stogLon"].is<float>())         locationLon = slot["stogLon"];
+      } else {
+        if (slot["name"].is<const char*>()) strlcpy(locationName, slot["name"], sizeof(locationName));
+        if (slot["lat"].is<float>())          locationLat = slot["lat"];
+        if (slot["lon"].is<float>())          locationLon = slot["lon"];
+      }
+      convertDanishToLatin1(locationName, sizeof(locationName));
       break;
 
   }
@@ -1704,6 +1777,7 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["dkCrs"].is<const char*>() && strlen(settings["dkCrs"])) dkRailIsSet = true; else dkRailIsSet = false;
         if (settings["letbaneId"].is<const char*>() && strlen(settings["letbaneId"])) letbaneIsSet = true; else letbaneIsSet = false;
         if (settings["dkBusId"].is<const char*>() && strlen(settings["dkBusId"])) dkBusIsSet = true; else dkBusIsSet = false;
+        if (settings["stogId"].is<const char*>() && strlen(settings["stogId"])) stogIsSet = true; else stogIsSet = false;
 
         if (settings["hostname"].is<const char*>())   strlcpy(hostname, settings["hostname"], sizeof(hostname));
         if (settings["wsdlHost"].is<const char*>())   strlcpy(wsdlHost, settings["wsdlHost"], sizeof(wsdlHost));
@@ -2003,6 +2077,11 @@ void softResetBoard(boardModes requestedMode) {
       checkWeatherUpdate(prevLat,prevLon);
       progressBar("Initialising Rejseplanen Bus interface",70);
       break;
+
+    case MODE_STOG:
+      checkWeatherUpdate(prevLat,prevLon);
+      progressBar("Initialising S-tog interface",70);
+      break;
   }
   station.numServices=0;
   messages.numMessages=0;
@@ -2023,7 +2102,7 @@ void switchToNextMode() {
     softResetBoard(MODE_LOADCONFIG);
   }
   else if (schedulerActive) softResetBoard(MODE_NEXTSCHEDULE);
-  else if (railIsSet+tubeIsSet+busIsSet+dkRailIsSet+letbaneIsSet+dkBusIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
+  else if (railIsSet+tubeIsSet+busIsSet+dkRailIsSet+letbaneIsSet+dkBusIsSet+stogIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
 }
 
 // WiFiManager callback, entered config mode
@@ -2158,16 +2237,20 @@ void promoteNextService() {
   }
 }
 
-// S-tog services at København H get a distinct look: a line-letter badge (e.g. a solid square with
-// a "A" punched out of it) in place of the scheduled time, and a Letbane-style minute countdown in
-// place of "Forventet HH:MM"/"Rettidig". Gated per-service (not just per-board) so a mixed board
-// (e.g. IC and S-tog both selected at the same station) still shows IC/Re/etc. services in the
-// normal layout - only rows that are actually S-tog (svc.isSTog, set from Rejseplanen's catOut
-// field) at København H switch style. Since S-tog only ever runs through København H when the
-// S-tog product checkbox is selected in the first place, checking isSTog naturally covers "only
-// with the S-tog checkbox checked" too - no separate dkProducts check needed here.
+// S-tog services get a distinct look: a line-letter badge (e.g. a solid square with a "A" punched
+// out of it) in place of the scheduled time, and a Letbane-style minute countdown in place of
+// "Forventet HH:MM"/"Rettidig". Two ways in:
+//  - MODE_STOG is a dedicated S-tog board (its own location slot, always fetched S-tog-only - see
+//    fetchDeparturesTask()) - every row uses the style, at whichever station it's configured for.
+//  - MODE_DKRAIL is gated per-service (not just per-board), and only at København H, so a mixed
+//    board there (e.g. IC and S-tog both selected) still shows IC/Re/etc. services normally - only
+//    rows that are actually S-tog (svc.isSTog, from Rejseplanen's catOut field) switch style. Since
+//    S-tog only ever appears in a MODE_DKRAIL board when the S-tog product checkbox is selected in
+//    the first place, checking isSTog naturally covers "only with the S-tog checkbox checked" too.
 bool useSTogStyle(int idx) {
-  return boardMode==MODE_DKRAIL && idx<station.numServices && station.service[idx].isSTog && strcmp(locationCode,RJ_KBH_H_STOP_ID)==0;
+  if (idx>=station.numServices) return false;
+  if (boardMode==MODE_STOG) return true;
+  return boardMode==MODE_DKRAIL && station.service[idx].isSTog && strcmp(locationCode,RJ_KBH_H_STOP_ID)==0;
 }
 
 // Rejseplanen has no seconds-resolution "time to arrival" field (unlike TfL), so approximate a
@@ -2190,13 +2273,61 @@ int sTogCountdownMinutes(const rdService &svc) {
 // and height, kept square as asked - two-letter lines (e.g. "Bx") just sit a little snugger inside
 // the same square rather than widening it. Saves/restores whatever font was active on entry, so it
 // can be called safely from mid-draw in either drawPrimaryService() or drawServiceLine().
+// Reads one glyph's tight ink box (width, height, x/y-offset) straight from the currently active
+// font's raw data - same low-level decode as getGlyphYOffset() above, extended to also capture
+// width and x-offset. u8g2's own u8g2_GetGlyphWidth()/getStrWidth() only return the ADVANCE width
+// (the cursor step, which includes each character's own built-in side-bearing/spacing) - centring
+// the badge letter by that number is why it looked centred for some letters and not others: how
+// much of the advance width is "real ink" vs spacing differs per letter, so centring the box instead
+// of the box's ink doesn't put the same letters in the same visual place.
+static bool getGlyphBox(u8g2_t *u, uint16_t encoding, int8_t *outW, int8_t *outH, int8_t *outXoff, int8_t *outYoff) {
+  const uint8_t *glyphData = u8g2_font_get_glyph_data(u, encoding);
+  if (!glyphData) return false;
+  u8g2_font_decode_t decode;
+  decode.decode_ptr = glyphData;
+  decode.decode_bit_pos = 0;
+  *outW = (int8_t)u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_width);
+  *outH = (int8_t)u8g2_font_decode_get_unsigned_bits(&decode, u->font_info.bits_per_char_height);
+  *outXoff = u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_x);
+  *outYoff = u8g2_font_decode_get_signed_bits(&decode, u->font_info.bits_per_char_y);
+  return true;
+}
+
 void drawSTogBadge(int x, int y, int size, const char *letter) {
   const uint8_t *prevFont = u8g2.getU8g2()->font;
   u8g2.drawRBox(x,y,size,size,2);
   u8g2.setFont(u8g2_font_6x10_tf);
-  int tw = u8g2.getStrWidth(letter);
+  u8g2_t *u = u8g2.getU8g2();
+  int8_t ascent = u8g2_GetFontAscent(u);
+
+  // Walk the label (1-2 chars, e.g. "Bx" for the Bx line) building its combined tight ink box, in
+  // the same coordinate space u8g2 itself draws in (x=0/y=ascent is where the first glyph's own
+  // origin sits) - advancing cursorX by each glyph's real advance width (u8g2_GetGlyphWidth(), not
+  // getStrWidth() per character, which - per getMixedStringWidth()'s own comment above - measures
+  // whichever character it's called on "tight" as if it were always the last one in the string).
+  int cursorX = 0, inkLeft=0, inkRight=0, inkTop=0, inkBottom=0;
+  bool any = false;
+  for (const char *p = letter; *p; p++) {
+    unsigned char c = (unsigned char)*p;
+    int8_t w,h,xoff,yoff;
+    if (getGlyphBox(u,c,&w,&h,&xoff,&yoff)) {
+      int left = cursorX+xoff, right = left+w;
+      int bottom = ascent-yoff, top = bottom-h;
+      if (!any) { inkLeft=left; inkRight=right; inkTop=top; inkBottom=bottom; any=true; }
+      else {
+        if (left<inkLeft) inkLeft=left;
+        if (right>inkRight) inkRight=right;
+        if (top<inkTop) inkTop=top;
+        if (bottom>inkBottom) inkBottom=bottom;
+      }
+    }
+    cursorX += u8g2_GetGlyphWidth(u,c);
+  }
+
+  int tx = any ? x + (size-(inkRight-inkLeft))/2 - inkLeft : x;
+  int ty = any ? y + (size-(inkBottom-inkTop))/2 - inkTop : y;
   u8g2.setDrawColor(0);
-  u8g2.drawStr(x+(size-tw)/2, y+(size-10)/2, letter);
+  u8g2.drawStr(tx,ty,letter);
   u8g2.setDrawColor(1);
   u8g2.setFont(prevFont);
 }
@@ -2226,14 +2357,14 @@ void drawPrimaryService(bool showVia) {
   if (sTogStyle && !station.service[0].isCancelled) {
     int mins = sTogCountdownMinutes(station.service[0]);
     sprintf(etd,"%d min",mins<1?1:mins);
-  } else if (isDigit(station.service[0].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[0].etd);
+  } else if (isDigit(station.service[0].etd[0])) sprintf(etd,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Forventet %s":"Exp %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
   int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
   u8g2.drawStr(SCREEN_WIDTH - etdWidth,LINE1-1,etd);
   int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
   if (station.platformAvailable && station.service[0].platform[0] && station.service[0].serviceType == TRAIN && !hidePlatform) {
-    sprintf(plat,boardMode==MODE_DKRAIL?"Spor %.7s":"Plat %.7s",station.service[0].platform);
+    sprintf(plat,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Spor %.7s":"Plat %.7s",station.service[0].platform);
     int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);;
     u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,LINE1-1,plat);
     spaceAvailable-=(platWidth+7);
@@ -2272,7 +2403,7 @@ void drawServiceLine(int line, int y) {
   char plat[14]; // was 9 - see the matching comment in drawPrimaryService()
   int destPos;
 
-  if (boardMode==MODE_DKRAIL) {
+  if (boardMode==MODE_DKRAIL || boardMode==MODE_STOG) {
     sprintf(ordinal,"%d. ",line+1);
   } else {
     switch (line) {
@@ -2314,14 +2445,14 @@ void drawServiceLine(int line, int y) {
     if (sTogStyle && !station.service[line].isCancelled) {
       int mins = sTogCountdownMinutes(station.service[line]);
       sprintf(etd,"%d min",mins<1?1:mins);
-    } else if (isDigit(station.service[line].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[line].etd);
+    } else if (isDigit(station.service[line].etd[0])) sprintf(etd,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Forventet %s":"Exp %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
     int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
     u8g2.drawStr(SCREEN_WIDTH - etdWidth,y-1,etd);
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
     if (station.platformAvailable && !hidePlatform && station.service[line].platform[0] && station.service[line].serviceType == TRAIN) {
-      sprintf(plat,boardMode==MODE_DKRAIL?"Spor %.7s":"Plat %.7s",station.service[line].platform);
+      sprintf(plat,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Spor %.7s":"Plat %.7s",station.service[line].platform);
       int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);
       u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat);
       spaceAvailable-=(platWidth+7);
@@ -2335,7 +2466,7 @@ void drawServiceLine(int line, int y) {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
       centreText(weatherMsg,y-1);
-    } else if (boardMode!=MODE_DKRAIL) {
+    } else if (boardMode!=MODE_DKRAIL && boardMode!=MODE_STOG) {
       // We're showing the mandatory attribution (not shown on the Danish rail board - no
       // attribution requirement from Rejseplanen, and the user asked for it removed)
       centreText(useRDMclient?rdgAttribution:nrAttributionn,y-1);
@@ -2347,7 +2478,7 @@ void drawServiceLine(int line, int y) {
 // prefixes are conveniently both 7 characters, so every existing strncmp(...,7) site can just
 // call this instead of hard-coding "Calling".)
 bool isCallingMessage(const char* msg) {
-  return strncmp(boardMode==MODE_DKRAIL?"Stopper":"Calling",msg,7)==0;
+  return strncmp((boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Stopper":"Calling",msg,7)==0;
 }
 
 // Draw the initial Departures Board
@@ -2376,7 +2507,7 @@ void drawStationBoard() {
   msgWidth = SCREEN_WIDTH;
 
   if (!noServiceClockIsActive) {
-    drawStationHeader(boardMode==MODE_DKRAIL?locationName:station.location,callingStation,locationFilter,nrTimeOffset);
+    drawStationHeader((boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?locationName:station.location,callingStation,locationFilter,nrTimeOffset);
 
     // Draw the primary service line
     isShowingVia=false;
@@ -2399,19 +2530,19 @@ void drawStationBoard() {
         }
         if (station.calling[0]) {
           // Add the calling stops message
-          sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Stopper ved: %s":"Calling at: %s",station.calling);
+          sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Stopper ved: %s":"Calling at: %s",station.calling);
           numMessages++;
         }
         // On the UK board this is inferred by comparing the service's origin against the current
         // station name; Rejseplanen's client already leaves station.origin blank whenever the
         // requested stop IS the origin, so use that directly for DK Rail.
-        bool startsHere = (boardMode==MODE_DKRAIL) ? !station.origin[0] : (strcmp(station.origin, station.location)==0);
+        bool startsHere = (boardMode==MODE_DKRAIL||boardMode==MODE_STOG) ? !station.origin[0] : (strcmp(station.origin, station.location)==0);
         if (startsHere) {
           // Service originates at this station
           if (station.service[0].opco[0]) {
-            sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Dette %s-tog starter her.":"This %s service starts here.",station.service[0].opco);
+            sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette %s-tog starter her.":"This %s service starts here.",station.service[0].opco);
           } else {
-            strcpy(line2[numMessages],boardMode==MODE_DKRAIL?"Dette tog starter her.":"This service starts here.");
+            strcpy(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette tog starter her.":"This service starts here.");
           }
           // Add the seating if available
           switch (station.service[0].classesAvailable) {
@@ -2431,13 +2562,13 @@ void drawStationBoard() {
           strcpy(line2[numMessages],"");
           if (station.service[0].opco[0]) {
             if (station.origin[0]) {
-              sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Dette er %s-toget fra %s.":"This is the %s service from %s.",station.service[0].opco,station.origin);
+              sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette er %s-toget fra %s.":"This is the %s service from %s.",station.service[0].opco,station.origin);
             } else {
-              sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Dette er %s-toget.":"This is the %s service.",station.service[0].opco);
+              sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette er %s-toget.":"This is the %s service.",station.service[0].opco);
             }
           } else {
             if (station.origin[0]) {
-              sprintf(line2[numMessages],boardMode==MODE_DKRAIL?"Toget k\xF8rte oprindeligt fra %s.":"This service originated at %s.",station.origin);
+              sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Toget k\xF8rte oprindeligt fra %s.":"This service originated at %s.",station.origin);
             }
           }
           // Add the seating if available
@@ -2467,7 +2598,7 @@ void drawStationBoard() {
     } else {
       blankArea(0,LINE2,256,LINE4-LINE2);
       setTallFont();
-      centreText(boardMode==MODE_DKRAIL?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled services at this station.",LINE1-1);
+      centreText((boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled services at this station.",LINE1-1);
     }
   } else {
     msgLine = LINE4;
@@ -2509,7 +2640,7 @@ void drawStationBoard() {
 }
 
 void updateRailDepartures() {
-  if (boardMode == MODE_DKRAIL) rejseplanenData.loadDepartures(&station,&messages);
+  if (boardMode == MODE_DKRAIL || boardMode == MODE_STOG) rejseplanenData.loadDepartures(&station,&messages);
   else if (useRDMclient) rdmRailData.loadDepartures(&station,&messages);
   else darwinRailData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
@@ -3038,6 +3169,7 @@ void handleInfo(AsyncWebServerRequest *request) {
     case MODE_DKRAIL:
     case MODE_LETBANE:
     case MODE_DKBUS:
+    case MODE_STOG:
       message+=String(jsonKeyBuffer.lastResultMessage);
       break;
   }
@@ -3045,7 +3177,7 @@ void handleInfo(AsyncWebServerRequest *request) {
   message+=getResultCodeText(lastUpdateResult);
   message+="\nServices: " + String(station.numServices) + "\nMessages: ";
   int nMsgs = messages.numMessages;
-  if (boardMode == MODE_TUBE || boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_DKBUS) nMsgs--;
+  if (boardMode == MODE_TUBE || boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_DKBUS || boardMode == MODE_STOG) nMsgs--;
   message+=String(nMsgs) + "\n";
 
   if (rssEnabled) {
@@ -3254,7 +3386,7 @@ void departureBoardLoop() {
         for (int i=0;i<numMessages;i++) {
           if (isCallingMessage(line2[i])) {
             // refresh the calling at times
-            sprintf(line2[i],boardMode==MODE_DKRAIL?"Stopper ved: %s":"Calling at: %s",station.calling);
+            sprintf(line2[i],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Stopper ved: %s":"Calling at: %s",station.calling);
             break;
           }
         }
@@ -3329,7 +3461,7 @@ void departureBoardLoop() {
         // slots occupy indices numServices .. numServices+extraSlots-1, so wrap as soon as
         // line3Service would reach numServices+extraSlots (>=, not >, which let one dead slot
         // through regardless of extraSlots - the actual cause of the still-visible gap).
-        int extraSlots = (weatherMsg[0]?1:0) + (boardMode!=MODE_DKRAIL?1:0);
+        int extraSlots = (weatherMsg[0]?1:0) + ((boardMode!=MODE_DKRAIL && boardMode!=MODE_STOG)?1:0);
         if (line3Service>=station.numServices+extraSlots) line3Service=(noScrolling && station.numServices>1) ? 2:1;  // First 'other' service
       } else {
         if (weatherMsg[0] && line3Service>1) line3Service=0;
@@ -4062,6 +4194,13 @@ void fetchDeparturesTask(void *pvParameters) {
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,DKBUS_PRODUCTS,false,"",0);
             nextDataUpdate = millis() + BUSDATAUPDATEINTERVAL;
             break;
+          case MODE_STOG:
+            // Own dedicated board - always S-tog-only (no product checkboxes to read), and no
+            // calling-direction filter of its own (that's a DK Rail-only config field) so calling
+            // points are fetched unfiltered from whichever service is first.
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset);
+            nextDataUpdate = millis()+apiRefreshRate;
+            break;
         }
         fetchComplete = true;
         break;
@@ -4192,7 +4331,7 @@ void setup(void) {
       delete body; // Clean up memory
       request->_tempObject = nullptr;
 
-      if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet) || request->hasParam("reboot")) {
+      if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || request->hasParam("reboot")) {
         // First time setup or base config change, we need a full reboot
         sendResponse(200,"Configuration saved. The Departures Board will now restart.",request);
         restartTimer.once(1, []() { ESP.restart(); });
@@ -4248,7 +4387,7 @@ void setup(void) {
         // Load/Update the API Keys in memory
         loadApiKeys();
         // If all location codes are blank we're in the setup process. If not, the keys have been changed so just reboot.
-        if (!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet) {
+        if (!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) {
           sendResponse(200,msg,request);
           writeDefaultConfig();
           showSetupCrsHelpScreen();
@@ -4377,7 +4516,7 @@ void setup(void) {
   }
   checkPostWebUpgrade();
   // First time configuration?
-  if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet) || (!nrToken[0] && rdmDeparturesApiKey=="" && boardMode==MODE_RAIL) || (!rejseplanenKey[0] && (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS))) {
+  if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || (!nrToken[0] && rdmDeparturesApiKey=="" && boardMode==MODE_RAIL) || (!rejseplanenKey[0] && (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS || boardMode==MODE_STOG))) {
     if (!apiKeys) showSetupKeysHelpScreen();
     else showSetupCrsHelpScreen();
     // First time setup mode will exit with a reboot, so just loop here forever
@@ -4467,6 +4606,9 @@ void setup(void) {
       startupProgressPercent=70;
   } else if (boardMode == MODE_DKBUS) {
       progressBar("Initialising Rejseplanen Bus interface",70);
+      startupProgressPercent=70;
+  } else if (boardMode == MODE_STOG) {
+      progressBar("Initialising S-tog interface",70);
       startupProgressPercent=70;
   }
 }
@@ -4564,6 +4706,10 @@ void loop(void) {
 
     case MODE_DKBUS:
       if (strcmp(locationCode,ODENSE_ST_ID)==0) odenseBusLoop(); else busDeparturesLoop();
+      break;
+
+    case MODE_STOG:
+      departureBoardLoop();
       break;
   }
 

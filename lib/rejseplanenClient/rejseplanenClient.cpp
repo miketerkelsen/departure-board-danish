@@ -523,10 +523,12 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     xStation->service[0].calling[0] = '\0';
     xStation->service[0].origin[0] = '\0';
 
-    // S-tog services at København H can call at a dozen-plus stops, and with a "(HH:MM)" on every
-    // one the "Stopper ved" list gets long enough to feel endless - drop the times there and just
-    // list stop names (the board still shows the S-tog line's own minute countdown separately).
-    bool omitCallingTimes = xStation->service[0].isSTog && strcmp(stopId, RJ_KBH_H_STOP_ID)==0;
+    // S-tog services can call at a dozen-plus stops, and with a "(HH:MM)" on every one the
+    // "Stopper ved" list gets long enough to feel endless - drop the times there and just list stop
+    // names (the board still shows the S-tog line's own minute countdown separately). Not tied to
+    // any specific station - any S-tog service benefits, whether reached via a mixed DK Rail board
+    // at København H or the dedicated S-tog mode at any other S-tog-served stop.
+    bool omitCallingTimes = xStation->service[0].isSTog;
 
     if (matchIdx >= 0) {
         if (matchIdx > 0) strlcpy(xStation->service[0].origin, callingStops[0].name, sizeof(xStation->service[0].origin));
