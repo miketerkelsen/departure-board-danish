@@ -2293,12 +2293,19 @@ static bool getGlyphBox(u8g2_t *u, uint16_t encoding, int8_t *outW, int8_t *outH
   return true;
 }
 
-void drawSTogBadge(int x, int y, int size, const char *letter) {
+void drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
   const uint8_t *prevFont = u8g2.getU8g2()->font;
   u8g2.drawRBox(x,y,size,size,2);
-  u8g2.setFont(u8g2_font_6x10_tf);
+  u8g2.setFont(font);
   u8g2_t *u = u8g2.getU8g2();
-  int8_t ascent = u8g2_GetFontAscent(u);
+  // u8g2's own PosTop mode adds font_ref_ascent+1 (not just font_ref_ascent) before handing y off to
+  // the glyph decoder - see u8g2_font_calc_vref_top() in u8g2_font.c ("reference pos is one pixel
+  // above the upper edge of the reference glyph", then target_y -= height+y_offset from there. This
+  // +1 is exactly cancelled out in drawMixedStr()'s yShift (it's a *difference* between two fonts'
+  // ascents, so any constant each side shares drops out) which is why that one didn't need it - but
+  // it does not cancel here, since this computes an absolute ink position, not a difference. Missing
+  // it was a real 1px vertical error in the original version of this centring fix.
+  int8_t ascent = u8g2_GetFontAscent(u) + 1;
 
   // Walk the label (1-2 chars, e.g. "Bx" for the Bx line) building its combined tight ink box, in
   // the same coordinate space u8g2 itself draws in (x=0/y=ascent is where the first glyph's own
@@ -2349,7 +2356,7 @@ void drawPrimaryService(bool showVia) {
   blankArea(0,LINE1-2,256,LINE2-LINE1+2);
   bool sTogStyle = useSTogStyle(0);
   if (sTogStyle) {
-    drawSTogBadge(0,LINE1-1,12,station.service[0].via[0]?station.service[0].via:"?");
+    drawSTogBadge(0,LINE1-1,12,station.service[0].via[0]?station.service[0].via:"?",u8g2_font_6x13B_tf);
     destPos = 12+4;
   } else {
     destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
@@ -2433,7 +2440,7 @@ void drawServiceLine(int line, int y) {
         u8g2.drawStr(0,y-1,ordinal);
         badgeX = 21;
       }
-      drawSTogBadge(badgeX,y-1,9,station.service[line].via[0]?station.service[line].via:"?");
+      drawSTogBadge(badgeX,y-1,9,station.service[line].via[0]?station.service[line].via:"?",u8g2_font_6x10_tf);
       destPos = badgeX+9+4;
     } else if (hideOrdinals) {
       destPos = u8g2.drawStr(0,y-1,station.service[line].sTime) + 6;
