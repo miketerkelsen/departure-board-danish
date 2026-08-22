@@ -40,7 +40,10 @@ struct rdService {
     char destination[MAXLOCATIONSIZE];
     char via[MAXLOCATIONSIZE];  // also used for line name for TfL
     char etd[11];
-    char platform[4];
+    char platform[8]; // was 4 - København H's S-tog tracks are shared island platforms, and
+                       // Rejseplanen reports those as a range like "9-10"/"11-12" (5 chars), not a
+                       // single number - the old 3-usable-char buffer (sized for UK platform
+                       // numbers, always 1-3 chars) was silently truncating those to "9-1"/"11-1"
     bool isCancelled;
     bool isDelayed;
     int trainLength;
@@ -74,7 +77,10 @@ struct rdService {
     char via[MAXLOCATIONSIZE];
     char origin[MAXLOCATIONSIZE];
     char etd[11];
-    char platform[4];
+    char platform[8]; // was 4 - København H's S-tog tracks are shared island platforms, and
+                       // Rejseplanen reports those as a range like "9-10"/"11-12" (5 chars), not a
+                       // single number - the old 3-usable-char buffer (sized for UK platform
+                       // numbers, always 1-3 chars) was silently truncating those to "9-1"/"11-1"
     bool isCancelled;
     bool isDelayed;
     int trainLength;

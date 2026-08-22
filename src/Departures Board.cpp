@@ -2163,7 +2163,8 @@ void drawPrimaryService(bool showVia) {
   int destPos;
   char clipDestination[MAXLOCATIONSIZE+5];
   char etd[16];
-  char plat[9];
+  char plat[14]; // was 9 - fits "Spor "/"Plat " (5) + up to 7 platform chars (e.g. Kobenhavn H's
+                  // S-tog "11-12" ranges) + null
 
   setTallFont();
   // Widened 2px on top vs. this row's nominal bounds: with the destination scroller's clip window
@@ -2180,7 +2181,7 @@ void drawPrimaryService(bool showVia) {
   int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
   if (station.platformAvailable && station.service[0].platform[0] && station.service[0].serviceType == TRAIN && !hidePlatform) {
-    sprintf(plat,boardMode==MODE_DKRAIL?"Spor %.3s":"Plat %.3s",station.service[0].platform);
+    sprintf(plat,boardMode==MODE_DKRAIL?"Spor %.7s":"Plat %.7s",station.service[0].platform);
     int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);;
     u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,LINE1-1,plat);
     spaceAvailable-=(platWidth+7);
@@ -2213,7 +2214,7 @@ void drawPrimaryService(bool showVia) {
 void drawServiceLine(int line, int y) {
   char clipDestination[MAXLOCATIONSIZE+5];
   char ordinal[5];
-  char plat[9];
+  char plat[14]; // was 9 - see the matching comment in drawPrimaryService()
   int destPos;
 
   if (boardMode==MODE_DKRAIL) {
@@ -2250,7 +2251,7 @@ void drawServiceLine(int line, int y) {
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
     if (station.platformAvailable && !hidePlatform && station.service[line].platform[0] && station.service[line].serviceType == TRAIN) {
-      sprintf(plat,boardMode==MODE_DKRAIL?"Spor %.3s":"Plat %.3s",station.service[line].platform);
+      sprintf(plat,boardMode==MODE_DKRAIL?"Spor %.7s":"Plat %.7s",station.service[line].platform);
       int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);
       u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat);
       spaceAvailable-=(platWidth+7);
