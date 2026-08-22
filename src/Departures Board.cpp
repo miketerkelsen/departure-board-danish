@@ -513,6 +513,7 @@ static bool isShowingVia=false;
 // for how "departed" is inferred (there's no such field in the data itself).
 static bool trainDepartedAnimating = false;
 static int trainDepartedXpos = 0;
+static unsigned long trainDepartedMoveTime = 0; // millis() timestamp the icon starts sliding at, after resting in place
 static char trainDepartedFingerprint[64] = ""; // identifies the departure that last played the
   // animation (sTime+destination, the closest thing to a stable id this data has), so it only
   // plays once per departure rather than every frame while it lingers as service[0]
@@ -3371,6 +3372,7 @@ void departureBoardLoop() {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
+      trainDepartedMoveTime = millis() + 1500; // rest in place for 1.5s before sliding off
     }
   }
 
@@ -3380,7 +3382,9 @@ void departureBoardLoop() {
     blankArea(0,LINE1-2,256,LINE2-LINE1+2);
     drawTrainIcon(trainDepartedXpos,LINE1+3);
     u8g2.updateDisplayArea(0,1,32,3);
-    trainDepartedXpos += 6; // ~240px/sec at this loop's ~40fps pace - crosses the screen in about a second
+    // Sits still (redrawn but not moved) until trainDepartedMoveTime, then slides right at ~120px/
+    // sec - half the previous speed - taking about 2 more seconds to clear the screen.
+    if (millis() >= trainDepartedMoveTime) trainDepartedXpos += 3;
     if (trainDepartedXpos > SCREEN_WIDTH) {
       trainDepartedAnimating = false;
       // A real data refresh may not have landed by now, in which case service[0] is still the very
