@@ -42,8 +42,8 @@ class rejseplanenClient: public JsonListenerGS {
         struct rjRawRecord {
           char time[9];
           char rtTime[9];
-          char track[4];
-          char rtTrack[4];
+          char track[8];   // was 4 - matches rdService::platform; København H's S-tog shared
+          char rtTrack[8]; // island platforms report ranges like "9-10"/"11-12" (5 chars)
           bool cancelled;
           int catCode;
           char catOut[16];      // e.g. "IC", "Re", "ECE", "Bus", "Togbus" - the reliable signal for
