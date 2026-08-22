@@ -2158,6 +2158,49 @@ void promoteNextService() {
   }
 }
 
+// S-tog services at København H get a distinct look: a line-letter badge (e.g. a solid square with
+// a "A" punched out of it) in place of the scheduled time, and a Letbane-style minute countdown in
+// place of "Forventet HH:MM"/"Rettidig". Gated per-service (not just per-board) so a mixed board
+// (e.g. IC and S-tog both selected at the same station) still shows IC/Re/etc. services in the
+// normal layout - only rows that are actually S-tog (svc.isSTog, set from Rejseplanen's catOut
+// field) at København H switch style. Since S-tog only ever runs through København H when the
+// S-tog product checkbox is selected in the first place, checking isSTog naturally covers "only
+// with the S-tog checkbox checked" too - no separate dkProducts check needed here.
+bool useSTogStyle(int idx) {
+  return boardMode==MODE_DKRAIL && idx<station.numServices && station.service[idx].isSTog && strcmp(locationCode,RJ_KBH_H_STOP_ID)==0;
+}
+
+// Rejseplanen has no seconds-resolution "time to arrival" field (unlike TfL), so approximate a
+// minute countdown from the service's (possibly realtime) HH:MM against the board's own current
+// time - the same approach already used for the Letbane board (see drawUndergroundService()).
+// Floors at 0 (never negative); callers floor the *displayed* value at 1 separately.
+int sTogCountdownMinutes(const rdService &svc) {
+  const char *timeStr = isDigit(svc.etd[0]) ? svc.etd : svc.sTime;
+  int h=0,m=0;
+  sscanf(timeStr,"%d:%d",&h,&m);
+  int delta = (h*60+m) - getTimeInMinutes();
+  if (delta < -60) delta += 1440;      // rolled over past midnight
+  else if (delta < 0) delta = 0;       // small negative from clock drift/refresh lag - treat as due now
+  return delta;
+}
+
+// Draws the S-tog line-letter badge: a small filled rounded square with the line letter "punched
+// out" in the background colour (e.g. a solid square with a black "A" knocked out of the white
+// fill), matching the roundel look of Copenhagen's real S-tog line signage. size is both the width
+// and height, kept square as asked - two-letter lines (e.g. "Bx") just sit a little snugger inside
+// the same square rather than widening it. Saves/restores whatever font was active on entry, so it
+// can be called safely from mid-draw in either drawPrimaryService() or drawServiceLine().
+void drawSTogBadge(int x, int y, int size, const char *letter) {
+  const uint8_t *prevFont = u8g2.getU8g2()->font;
+  u8g2.drawRBox(x,y,size,size,2);
+  u8g2.setFont(u8g2_font_6x10_tf);
+  int tw = u8g2.getStrWidth(letter);
+  u8g2.setDrawColor(0);
+  u8g2.drawStr(x+(size-tw)/2, y+(size-10)/2, letter);
+  u8g2.setDrawColor(1);
+  u8g2.setFont(prevFont);
+}
+
 // Draw the primary service line
 void drawPrimaryService(bool showVia) {
   int destPos;
@@ -2173,8 +2216,17 @@ void drawPrimaryService(bool showVia) {
   // actually being drawn there - this just makes sure it also reliably gets cleared again on the
   // next redraw, rather than leaving a ghost if the next value drawn doesn't reach that high.
   blankArea(0,LINE1-2,256,LINE2-LINE1+2);
-  destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
-  if (isDigit(station.service[0].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[0].etd);
+  bool sTogStyle = useSTogStyle(0);
+  if (sTogStyle) {
+    drawSTogBadge(0,LINE1-1,12,station.service[0].via[0]?station.service[0].via:"?");
+    destPos = 12+4;
+  } else {
+    destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
+  }
+  if (sTogStyle && !station.service[0].isCancelled) {
+    int mins = sTogCountdownMinutes(station.service[0]);
+    sprintf(etd,"%d min",mins<1?1:mins);
+  } else if (isDigit(station.service[0].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
   int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
   u8g2.drawStr(SCREEN_WIDTH - etdWidth,LINE1-1,etd);
@@ -2187,7 +2239,10 @@ void drawPrimaryService(bool showVia) {
     spaceAvailable-=(platWidth+7);
   }
 
-  if (showVia) strcpy(clipDestination,station.service[0].via);
+  // sTogStyle rows already show the line letter permanently in the badge, so the via-toggle (which
+  // for DK Rail shows the service's line/train-number label, e.g. "A" or "ICL 50018") would just be
+  // redundant - always show the destination for those rows regardless of showVia.
+  if (showVia && !sTogStyle) strcpy(clipDestination,station.service[0].via);
   else {
     strcpy(clipDestination,station.service[0].destination);
     if (station.service[0].serviceType == BUS) strcat(clipDestination," ~");  // Add bus icon to destination
@@ -2237,14 +2292,29 @@ void drawServiceLine(int line, int y) {
   blankArea(0,y,256,9);
 
   if (line<station.numServices) {
-    if (hideOrdinals) {
+    bool sTogStyle = useSTogStyle(line);
+    if (sTogStyle) {
+      // Badge replaces the scheduled time (kept alongside the ordinal, if shown, so it's still
+      // clear this is the 2nd/3rd upcoming departure) - see the matching comment in
+      // drawPrimaryService() for why the badge/countdown style only applies per-row.
+      int badgeX = 0;
+      if (!hideOrdinals) {
+        u8g2.drawStr(0,y-1,ordinal);
+        badgeX = 21;
+      }
+      drawSTogBadge(badgeX,y-1,9,station.service[line].via[0]?station.service[line].via:"?");
+      destPos = badgeX+9+4;
+    } else if (hideOrdinals) {
       destPos = u8g2.drawStr(0,y-1,station.service[line].sTime) + 6;
     } else {
       u8g2.drawStr(0,y-1,ordinal);
       destPos = u8g2.drawStr(21,y-1,station.service[line].sTime) + 25;
     }
     char etd[16];
-    if (isDigit(station.service[line].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[line].etd);
+    if (sTogStyle && !station.service[line].isCancelled) {
+      int mins = sTogCountdownMinutes(station.service[line]);
+      sprintf(etd,"%d min",mins<1?1:mins);
+    } else if (isDigit(station.service[line].etd[0])) sprintf(etd,boardMode==MODE_DKRAIL?"Forventet %s":"Exp %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
     int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
     u8g2.drawStr(SCREEN_WIDTH - etdWidth,y-1,etd);
@@ -3297,7 +3367,10 @@ void departureBoardLoop() {
         timer=millis()+6000;
         isScrollingStops=false;
       } else {
-        scrollStopsXpos--;
+        // The København H S-tog "Stopper ved" list can run to a dozen-plus stops even with the
+        // times dropped (see the omitCallingTimes comment in rejseplanenClient.cpp) - scroll it
+        // noticeably faster than every other message so it doesn't dominate the display for ages.
+        scrollStopsXpos -= (isCallingMessage(line2[currentMessage]) && useSTogStyle(0)) ? 2 : 1;
         if (scrollStopsXpos < -scrollStopsLength+msgMargin) {
           isScrollingStops=false;
           timer=millis()+500;  // pause before next message

@@ -20,6 +20,10 @@
 
 #define MAXPATHSTACK 12                // headroom for deeply-nested fields (e.g. service alert Messages)
 
+// København H's Rejseplanen stop id - gates the S-tog line-badge board style (see
+// Departures Board.cpp's useSTogStyle()) and the shortened "Stopper ved" list below.
+#define RJ_KBH_H_STOP_ID "8600626"
+
 class rejseplanenClient: public JsonListenerGS {
 
     private:

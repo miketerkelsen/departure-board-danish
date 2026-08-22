@@ -142,6 +142,7 @@ void rejseplanenClient::finaliseDepartureRecord() {
     // Snalltaget at Odense). catOut is the human-readable product abbreviation and reliably says
     // "Bus" for anything bus-shaped, so match on that instead.
     svc.serviceType = containsCaseInsensitive(raw.catOut,"bus") ? BUS : TRAIN;
+    svc.isSTog = containsCaseInsensitive(raw.catOut,"S-Tog");
 
     char rtTimeShort[6];
     strlcpy(rtTimeShort, raw.rtTime, sizeof(rtTimeShort));
@@ -327,6 +328,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         xStation->service[i].serviceType = 0;
         xStation->service[i].isCancelled = false;
         xStation->service[i].isDelayed = false;
+        xStation->service[i].isSTog = false;
     }
     numCallingStops = 0;
 
@@ -521,12 +523,17 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     xStation->service[0].calling[0] = '\0';
     xStation->service[0].origin[0] = '\0';
 
+    // S-tog services at København H can call at a dozen-plus stops, and with a "(HH:MM)" on every
+    // one the "Stopper ved" list gets long enough to feel endless - drop the times there and just
+    // list stop names (the board still shows the S-tog line's own minute countdown separately).
+    bool omitCallingTimes = xStation->service[0].isSTog && strcmp(stopId, RJ_KBH_H_STOP_ID)==0;
+
     if (matchIdx >= 0) {
         if (matchIdx > 0) strlcpy(xStation->service[0].origin, callingStops[0].name, sizeof(xStation->service[0].origin));
         for (int i=matchIdx+1; i<numCallingStops; i++) {
             // "Stop name (HH:MM)" - matches the UK rail board's calling-point format
             char entry[MAXLOCATIONSIZE+10];
-            if (callingStops[i].time[0]) sprintf(entry,"%s (%s)",callingStops[i].name,callingStops[i].time);
+            if (!omitCallingTimes && callingStops[i].time[0]) sprintf(entry,"%s (%s)",callingStops[i].name,callingStops[i].time);
             else strlcpy(entry,callingStops[i].name,sizeof(entry));
 
             size_t curLen = strlen(xStation->service[0].calling);
@@ -560,6 +567,7 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         strlcpy(station->service[i].opco, xStation->service[i].opco, sizeof(station->service[0].opco));
         strlcpy(station->service[i].stopArea, xStation->service[i].stopArea, sizeof(station->service[0].stopArea));
         station->service[i].serviceType = xStation->service[i].serviceType;
+        station->service[i].isSTog = xStation->service[i].isSTog;
     }
     if (xStation->numServices) {
         strlcpy(station->calling, xStation->service[0].calling, sizeof(station->calling));
