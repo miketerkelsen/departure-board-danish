@@ -1145,11 +1145,11 @@ void showUpdateIcon(bool show) {
 void showSetupScreen() {
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreText("Departures Board first-time setup",0);
+  centreMixedText("Departures Board - f\xF8rste ops\xE6tning",0,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("To configure Wi-Fi, please connect to the",18);
-  centreText("the \"Departures Board\" network and go to",32);
-  centreText("http://192.168.4.1 in a web browser.",46);
+  centreText("For at konfigurere Wi-Fi skal du forbinde til",18);
+  centreMixedText("netv\xE6rket \"Departures Board\" og g\xE5 til",32,u8g2_font_6x10_tf);
+  centreText("http://192.168.4.1 i en browser.",46);
   u8g2.sendBuffer();
 }
 
@@ -1160,20 +1160,20 @@ void showNoDataScreen() {
   u8g2.setFont(NatRailTall12);
   switch (boardMode) {
     case MODE_DKRAIL:
-      sprintf(msg,"No data available for stop id \"%s\".",locationCode);
+      sprintf(msg,"Ingen data tilg\xE6ngelig for stop-id \"%s\".",locationCode);
       break;
     case MODE_LETBANE:
-      strcpy(msg,"No data available for the selected letbane stop.");
+      strcpy(msg,"Ingen data tilg\xE6ngelig for det valgte letbane-stop.");
       break;
     case MODE_DKBUS:
     case MODE_STOG:
-      sprintf(msg,"No data available for stop id \"%s\".",locationCode);
+      sprintf(msg,"Ingen data tilg\xE6ngelig for stop-id \"%s\".",locationCode);
       break;
   }
-  centreText(msg,-1);
+  centreMixedText(msg,-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("Please check you have selected a valid location",14);
-  centreText("Go to the URL below to choose a location...",26);
+  centreText("Tjek at du har valgt en gyldig lokation",14);
+  centreMixedText("G\xE5 til URL'en nedenfor for at v\xE6lge en lokation...",26,u8g2_font_6x10_tf);
   centreText(myUrl,40);
   u8g2.sendBuffer();
 }
@@ -1182,10 +1182,10 @@ void showSetupKeysHelpScreen() {
   u8g2.clearBuffer();
   char msg[60];
   u8g2.setFont(NatRailTall12);
-  centreText("Departures Board Setup",-1);
+  centreMixedText("Departures Board - Ops\xE6tning",-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("Next, you need to enter your API keys.",16);
-  centreText("Please go to the URL below to start...",28);
+  centreMixedText("Du skal nu indtaste dine API-n\xF8gler.",16,u8g2_font_6x10_tf);
+  centreMixedText("G\xE5 til URL'en nedenfor for at starte...",28,u8g2_font_6x10_tf);
   u8g2.setFont(NatRailTall12);
   centreText(myUrl,50);
   u8g2.sendBuffer();
@@ -1195,10 +1195,10 @@ void showSetupCrsHelpScreen() {
   u8g2.clearBuffer();
   char msg[60];
   u8g2.setFont(NatRailTall12);
-  centreText("Departures Board Setup",-1);
+  centreMixedText("Departures Board - Ops\xE6tning",-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("Next, you need to choose a location. Please",16);
-  centreText("go to the URL below to choose a station...",28);
+  centreMixedText("Du skal nu v\xE6lge en station.",16,u8g2_font_6x10_tf);
+  centreMixedText("G\xE5 til URL'en nedenfor for at g\xF8re dette...",28,u8g2_font_6x10_tf);
   u8g2.setFont(NatRailTall12);
   centreText(myUrl,50);
   u8g2.sendBuffer();
@@ -1209,10 +1209,10 @@ void showTokenErrorScreen() {
   noServiceClockIsActive = false;
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreText("Access to the Rejseplanen database denied.",-1);
+  centreMixedText("Adgang til Rejseplanen-databasen n\xE6gtet.",-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("You must enter a valid api key, please",14);
-  centreText("check you have entered it correctly below:",26);
+  centreMixedText("Du skal indtaste en gyldig API-n\xF8gle,",14,u8g2_font_6x10_tf);
+  centreText("tjek at du har indtastet den korrekt nedenfor:",26);
   sprintf(msg,"%s/keys.htm",myUrl);
   centreText(msg,40);
   u8g2.sendBuffer();
@@ -1223,11 +1223,11 @@ void showCRSErrorScreen() {
   u8g2.clearBuffer();
   char msg[60];
   u8g2.setFont(NatRailTall12);
-  sprintf(msg,"The Rejseplanen stop id \"%s\" is not valid.",locationCode);
+  sprintf(msg,"Rejseplanen stop-id'et \"%s\" er ikke gyldigt.",locationCode);
   centreText(msg,-1);
   u8g2.setFont(NatRailSmall9);
-  centreText("Please ensure you have selected a valid station.",14);
-  centreText("Go to the URL below to choose a station...",26);
+  centreText("Tjek at du har valgt en gyldig station.",14);
+  centreMixedText("G\xE5 til URL'en nedenfor for at v\xE6lge en station...",26,u8g2_font_6x10_tf);
   centreText(myUrl,40);
   u8g2.sendBuffer();
 }
@@ -1236,24 +1236,24 @@ void showFirmwareUpdateWarningScreen(const char *msg, int secs) {
   char countdown[60];
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreText("Firmware Update Available",-1);
+  centreMixedText("Firmwareopdatering tilg\xE6ngelig",-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("A new version of the Departures Board firmware",14);
-  sprintf(countdown,"will be installed in %d seconds. This provides:",secs);
+  centreText("En ny version af Departures Board-firmwaren",14);
+  sprintf(countdown,"installeres om %d sekunder. Dette inkluderer:",secs);
   centreText(countdown,26);
   sprintf(countdown,"\"%s\"",msg);
   centreText(countdown,40);
-  centreText("* DO NOT REMOVE THE POWER DURING THE UPDATE *",54);
+  centreMixedText("* AFBRYD IKKE STR\xD8MMEN UNDER OPDATERINGEN *",54,u8g2_font_6x10_tf);
   u8g2.sendBuffer();
 }
 
 void showFirmwareUpdateProgress(int percent) {
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreText("Firmware Update in Progress",-1);
+  centreText("Firmwareopdatering i gang",-1);
   u8g2.setFont(NatRailSmall9);
-  progressBar("Updating Firmware",percent);
-  centreText("* DO NOT REMOVE THE POWER DURING THE UPDATE *",54);
+  progressBar("Opdaterer firmware",percent);
+  centreMixedText("* AFBRYD IKKE STR\xD8MMEN UNDER OPDATERINGEN *",54,u8g2_font_6x10_tf);
   u8g2.sendBuffer();
 }
 
@@ -1261,14 +1261,14 @@ void showUpdateCompleteScreen(const char *title, const char *msg1, const char *m
   char countdown[60];
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreText(title,-1);
+  centreMixedText(title,-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText(msg1,14);
-  centreText(msg2,26);
-  centreText(msg3,40);
-  if (showReboot) sprintf(countdown,"The system will restart in %d seconds.",secs);
-  else sprintf(countdown,"The system will continue in %d seconds.",secs);
-  centreText(countdown,54);
+  centreMixedText(msg1,14,u8g2_font_6x10_tf);
+  centreMixedText(msg2,26,u8g2_font_6x10_tf);
+  centreMixedText(msg3,40,u8g2_font_6x10_tf);
+  if (showReboot) sprintf(countdown,"Systemet genstarter om %d sekunder.",secs);
+  else sprintf(countdown,"Systemet forts\xE6tter om %d sekunder.",secs);
+  centreMixedText(countdown,54,u8g2_font_6x10_tf);
   u8g2.sendBuffer();
 }
 
@@ -1276,11 +1276,11 @@ void showSwitchScreen() {
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
 
-  if (carouselActive) centreText("Moving to next carousel slot",20);
-  else if (schedulerActive) centreText("Moving to next scheduler slot",20);
-  else centreText("Switching modes",20);
+  if (carouselActive) centreMixedText("Skifter til n\xE6ste karrusel-placering",20,u8g2_font_6x13_tf);
+  else if (schedulerActive) centreMixedText("Skifter til n\xE6ste tidsplan-placering",20,u8g2_font_6x13_tf);
+  else centreText("Skifter tilstand",20);
   u8g2.setFont(NatRailSmall9);
-  centreText("Waiting for background process to complete...",42);
+  centreMixedText("Venter p\xE5 baggrundsproces...",42,u8g2_font_6x10_tf);
   u8g2.sendBuffer();
 }
 
@@ -1346,7 +1346,7 @@ void checkPostWebUpgrade() {
     sprintf(currentGUI,"W%d.%d",WEBAPPVER_MAJOR,WEBAPPVER_MINOR);
     if (strcmp(prevGUI,currentGUI)) {
       // clean up old/dev files
-      progressBar("Cleaning up following upgrade",45);
+      progressBar("Rydder op efter opgradering",45);
       LittleFS.remove("/index_d.htm");
       LittleFS.remove("/index.htm");
       LittleFS.remove("/keys.htm");
@@ -1752,7 +1752,7 @@ void updateCurrentWeather(float latitude, float longitude) {
 void checkWeatherUpdate(float prevLat, float prevLon) {
   if (weatherEnabled && (prevLat!=locationLat || prevLon!=locationLon)) {
     prevProgressBarPosition = 114;
-    progressBar("Getting weather conditions",60);
+    progressBar("Henter vejrdata",60);
     updateCurrentWeather(locationLat,locationLon);
   }
 }
@@ -1776,7 +1776,7 @@ void softResetBoard(boardModes requestedMode) {
   tzset();
   u8g2.clearBuffer();
   drawStartupHeading();
-  if (requestedMode==MODE_NEXTMODE) centreText("Switching modes...",53);
+  if (requestedMode==MODE_NEXTMODE) centreText("Skifter tilstand...",53);
   u8g2.updateDisplay();
 
   // Force an update asap
@@ -1815,7 +1815,7 @@ void softResetBoard(boardModes requestedMode) {
     rssMessage[0] = '\0';
     if (boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_STOG) {
       prevProgressBarPosition = 95;
-      progressBar("Updating RSS headlines feed",50);
+      progressBar("Opdaterer RSS-nyheder",50);
       updateRssFeed();
     }
   } else if (rssEnabled && previousMode != boardMode && boardMode != MODE_DKBUS) {
@@ -1825,22 +1825,22 @@ void softResetBoard(boardModes requestedMode) {
   switch (boardMode) {
     case MODE_DKRAIL:
       checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialising Rejseplanen interface",70);
+      progressBar("Initialiserer Rejseplanen",70);
       break;
 
     case MODE_LETBANE:
       checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialising Letbane interface",70);
+      progressBar("Initialiserer Letbane",70);
       break;
 
     case MODE_DKBUS:
       checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialising Rejseplanen Bus interface",70);
+      progressBar("Initialiserer Rejseplanen Bus",70);
       break;
 
     case MODE_STOG:
       checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialising S-tog interface",70);
+      progressBar("Initialiserer S-tog",70);
       break;
   }
   station.numServices=0;
@@ -1910,11 +1910,11 @@ bool checkForFirmwareUpdate() {
   httpUpdate.rebootOnUpdate(false); // Don't auto reboot, we'll handle it
 
   HTTPUpdateResult ret = httpUpdate.handleUpdate(client, ghUpdate.firmwareURL);
-  const char* msgTitle = "Firmware Update";
+  const char* msgTitle = "Firmwareopdatering";
   switch (ret) {
     case HTTP_UPDATE_FAILED:
       char msg[60];
-      sprintf(msg,"The update failed with error %d.",httpUpdate.getLastError());
+      sprintf(msg,"Opdateringen mislykkedes med fejl %d.",httpUpdate.getLastError());
       result=false;
       for (int i=20;i>=0;i--) {
         showUpdateCompleteScreen(msgTitle,msg,httpUpdate.getLastErrorString().c_str(),"",i,false);
@@ -1924,14 +1924,14 @@ bool checkForFirmwareUpdate() {
 
     case HTTP_UPDATE_NO_UPDATES:
       for (int i=10;i>=0;i--) {
-        showUpdateCompleteScreen(msgTitle,"","No firmware updates were available.","",i,false);
+        showUpdateCompleteScreen(msgTitle,"","Ingen firmwareopdateringer var tilg\xE6ngelige.","",i,false);
         delay(1000);
       }
       break;
 
     case HTTP_UPDATE_OK:
       for (int i=20;i>=0;i--) {
-        showUpdateCompleteScreen(msgTitle,"The firmware update has completed successfully.","For more information visit the URL below:","github.com/miketerkelsen/departure-board-danish/releases",i,true);
+        showUpdateCompleteScreen(msgTitle,"Firmwareopdateringen blev gennemf\xF8rt.","For mere information, bes\xF8g URL'en nedenfor:","github.com/miketerkelsen/departure-board-danish/releases",i,true);
         delay(1000);
       }
       ESP.restart();
@@ -2417,34 +2417,22 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
   blankArea(0,y,256,10);
 
   if (serviceId < station.numServices) {
-    if (boardMode == MODE_LETBANE) {
-      // Rejseplanen doesn't provide a "seconds/minutes to arrival" countdown like TfL, so
-      // compute an approximate one from the (possibly realtime) clock time vs. the board's own
-      // current time, mimicking the tube board's "X min" style rather than showing a bare clock time.
-      const char *timeStr = isDigit(station.service[serviceId].etd[0]) ? station.service[serviceId].etd : station.service[serviceId].sTime;
-      int svcH=0, svcM=0;
-      sscanf(timeStr, "%d:%d", &svcH, &svcM);
-      int delta = (svcH*60+svcM) - getTimeInMinutes();
-      if (delta < -60) delta += 1440;      // rolled over past midnight
-      else if (delta < 0) delta = 0;       // small negative from clock drift/refresh lag - treat as due now
+    // Rejseplanen doesn't provide a "seconds/minutes to arrival" countdown like TfL, so compute an
+    // approximate one from the (possibly realtime) clock time vs. the board's own current time.
+    const char *timeStr = isDigit(station.service[serviceId].etd[0]) ? station.service[serviceId].etd : station.service[serviceId].sTime;
+    int svcH=0, svcM=0;
+    sscanf(timeStr, "%d:%d", &svcH, &svcM);
+    int delta = (svcH*60+svcM) - getTimeInMinutes();
+    if (delta < -60) delta += 1440;      // rolled over past midnight
+    else if (delta < 0) delta = 0;       // small negative from clock drift/refresh lag - treat as due now
 
-      char letbaneTime[8];
-      sprintf(letbaneTime,"%d min",delta<1?1:delta); // never show 0/"Nu" - floor the display at "1 min"
-      int timeWidth = getStringWidth(letbaneTime);
-      // Blink the time (500ms on/off) once it's due or arriving within a minute, to draw the eye to it
-      bool blinkVisible = (delta > 1) || ((millis()/500) % 2 == 0);
-      if (blinkVisible) u8g2.drawStr(SCREEN_WIDTH-timeWidth,y-1,letbaneTime);
-      usedSpace += timeWidth + 8;
-    } else if (serviceId || (strcmp(station.origin,"At Platform") && station.service[0].timeToStation>10)) {
-      if (station.service[serviceId].timeToStation <= 40) {
-        usedSpace += u8g2.drawStr(SCREEN_WIDTH-19,y-1,"Due");
-      } else {
-        int mins = (station.service[serviceId].timeToStation + 30) / 60; // Round to nearest minute
-        sprintf(serviceData,"%d",mins);
-        if (mins==1) u8g2.drawStr(SCREEN_WIDTH-22,y-1,"min"); else u8g2.drawStr(SCREEN_WIDTH-22,y-1,"mins");
-        usedSpace += u8g2.drawStr(SCREEN_WIDTH-27-(strlen(serviceData)*7),y-1,serviceData) + 22;
-      }
-    }
+    char letbaneTime[8];
+    sprintf(letbaneTime,"%d min",delta<1?1:delta); // never show 0/"Nu" - floor the display at "1 min"
+    int timeWidth = getStringWidth(letbaneTime);
+    // Blink the time (500ms on/off) once it's due or arriving within a minute, to draw the eye to it
+    bool blinkVisible = (delta > 1) || ((millis()/500) % 2 == 0);
+    if (blinkVisible) u8g2.drawStr(SCREEN_WIDTH-timeWidth,y-1,letbaneTime);
+    usedSpace += timeWidth + 8;
 
     if (isShowingCurrentLocation) sprintf(serviceData,"%d %s",serviceId+1,station.origin);
     else sprintf(serviceData,"%d %s",serviceId+1,station.service[serviceId].destination);
@@ -2928,14 +2916,14 @@ void handleOtaUpdate(AsyncWebServerRequest *request) {
 void doManualOtaCheck() {
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreText("Getting latest firmware details from GitHub...",26);
+  centreText("Henter seneste firmware-info fra GitHub...",26);
   u8g2.sendBuffer();
 
   if (ghUpdate.getLatestRelease()==UPD_SUCCESS) {
     checkForFirmwareUpdate();
   } else {
     for (int i=15;i>=0;i--) {
-      showUpdateCompleteScreen("Firmware Update Check Failed","Unable to retrieve latest release information.",jsonKeyBuffer.lastResultMessage,"",i,false);
+      showUpdateCompleteScreen("Tjek for firmwareopdatering mislykkedes","Kunne ikke hente information om seneste udgivelse.",jsonKeyBuffer.lastResultMessage,"",i,false);
       delay(1000);
     }
   }
@@ -3943,7 +3931,7 @@ void setup(void) {
   u8g2.clearBuffer();
   drawStartupHeading();
   u8g2.sendBuffer();
-  progressBar("Connecting to Wi-Fi",20);
+  progressBar("Forbinder til Wi-Fi",20);
   WiFi.mode(WIFI_MODE_NULL);        // Reset the WiFi
   WiFi.setSleep(WIFI_PS_NONE);      // Turn off WiFi Powersaving
   WiFi.hostname(hostname);          // Set the hostname ("Departures Board")
@@ -3981,7 +3969,7 @@ void setup(void) {
   char ipBuff[17];
   WiFi.localIP().toString().toCharArray(ipBuff,sizeof(ipBuff));   // Get the IP address of the ESP32
   centreText(ipBuff,53);                                          // Display the IP address
-  progressBar("Wi-Fi Connected",30);
+  progressBar("Wi-Fi forbundet",30);
   u8g2.sendBuffer();                                              // Send to OLED panel
 
   // Configure the local webserver paths
@@ -4179,12 +4167,12 @@ void setup(void) {
 
   // Check for Firmware updates?
   if (firmwareUpdates) {
-    progressBar("Checking for firmware updates",40);
+    progressBar("Tjekker for firmwareopdateringer",40);
     if (ghUpdate.getLatestRelease()==UPD_SUCCESS) {
       checkForFirmwareUpdate();
     } else {
       for (int i=15;i>=0;i--) {
-        showUpdateCompleteScreen("Firmware Update Check Failed","Unable to retrieve latest release information.",jsonKeyBuffer.lastResultMessage,"",i,false);
+        showUpdateCompleteScreen("Tjek for firmwareopdatering mislykkedes","Kunne ikke hente information om seneste udgivelse.",jsonKeyBuffer.lastResultMessage,"",i,false);
         delay(1000);
       }
       u8g2.clearDisplay();
@@ -4211,19 +4199,19 @@ void setup(void) {
   int p=50;
   int ntpAttempts=0;
   bool ntpResult=true;
-  progressBar("Setting the system clock...",50);
+  progressBar("Indstiller systemuret...",50);
   if(!getLocalTime(&timeinfo,2000)) {              // attempt to set the clock from NTP
     do {
       ntpResult = getLocalTime(&timeinfo,2000);
       ntpAttempts++;
       p+=5;
-      progressBar("Setting the system clock...",p);
+      progressBar("Indstiller systemuret...",p);
       if (p>80) p=45;
     } while ((!ntpResult) && (ntpAttempts<10));
   }
   if (!ntpResult) {
     // Sometimes NTP/UDP fails. A reboot usually fixes it.
-    progressBar("Failed to set the clock. Rebooting in 5 sec.",0);
+    progressBar("Kunne ikke indstille uret. Genstarter om 5 sek.",0);
     delay(5000);
     ESP.restart();
   }
@@ -4235,12 +4223,12 @@ void setup(void) {
 
   station.numServices=0;
   if (rssEnabled && boardMode!=MODE_DKBUS) {
-    progressBar("Loading RSS headlines feed",60);
+    progressBar("Henter RSS-nyheder",60);
     updateRssFeed();
   }
 
   if (weatherEnabled) {
-    progressBar("Getting weather conditions",64);
+    progressBar("Henter vejrdata",64);
     updateCurrentWeather(locationLat,locationLon);
   }
 
@@ -4256,16 +4244,16 @@ void setup(void) {
   );
 
   if (boardMode == MODE_DKRAIL) {
-      progressBar("Initialising Rejseplanen interface",70);
+      progressBar("Initialiserer Rejseplanen",70);
       startupProgressPercent=70;
   } else if (boardMode == MODE_LETBANE) {
-      progressBar("Initialising Letbane interface",70);
+      progressBar("Initialiserer Letbane",70);
       startupProgressPercent=70;
   } else if (boardMode == MODE_DKBUS) {
-      progressBar("Initialising Rejseplanen Bus interface",70);
+      progressBar("Initialiserer Rejseplanen Bus",70);
       startupProgressPercent=70;
   } else if (boardMode == MODE_STOG) {
-      progressBar("Initialising S-tog interface",70);
+      progressBar("Initialiserer S-tog",70);
       startupProgressPercent=70;
   }
 }
