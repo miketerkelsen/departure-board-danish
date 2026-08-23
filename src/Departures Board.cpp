@@ -2255,20 +2255,19 @@ bool useSTogStyle(int idx) {
 
 // Rejseplanen has no seconds-resolution "time to arrival" field (unlike TfL), so approximate a
 // countdown from the service's (possibly realtime) HH:MM against the board's own current time -
-// down to the second (timeinfo.tm_sec), not just the minute, so the display isn't stuck jumping
-// straight from "due" to a whole "1 min" with nothing in between. Writes the formatted countdown
-// text ("Nu"/"1/2 min"/"1 min"/"2 min"/...) into out.
+// down to the second (timeinfo.tm_sec), not just the minute. Steps down to "1/2 min" at the 30s
+// mark and just holds there (no separate "due"/"Nu" state) - the real board this is modelled on
+// doesn't have one, and by the time it would matter the departed-service animation (see its trigger
+// in departureBoardLoop()) has already cleared the row for S-tog services anyway. Writes the
+// formatted countdown text ("1/2 min"/"1 min"/"2 min"/...) into out.
 void sTogCountdownText(const rdService &svc, char *out, size_t outSize) {
   const char *timeStr = isDigit(svc.etd[0]) ? svc.etd : svc.sTime;
   int h=0,m=0;
   sscanf(timeStr,"%d:%d",&h,&m);
   long deltaSec = (long)(h*3600+m*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
-  if (deltaSec < -3600*12) deltaSec += 86400;  // rolled over past midnight
-  else if (deltaSec < 0) deltaSec = 0;         // small negative from clock drift/refresh lag - treat as due now
-  if (deltaSec < 15) {
-    strlcpy(out,"Nu",outSize);                 // due (Danish "now")
-  } else if (deltaSec < 45) {
-    strlcpy(out,"1/2 min",outSize);            // ~30s away - too soon for "1 min" to read right
+  if (deltaSec < -3600) deltaSec += 86400;   // rolled over past midnight - tomorrow's early departure, not overdue
+  if (deltaSec <= 30) {
+    strlcpy(out,"1/2 min",outSize);
   } else {
     int mins = (int)((deltaSec + 30) / 60);    // round to nearest whole minute, same as the Letbane board
     snprintf(out,outSize,"%d min",mins);
@@ -2577,19 +2576,12 @@ void drawStationBoard() {
           }
           numMessages++;
         } else {
-          // Service originates elsewhere
+          // Service originates elsewhere - deliberately no "This is the X service from Y."/
+          // "This service originated at Y." message here any more (removed per user request: it
+          // didn't carry any actionable information for a departure board, in any mode). Seating-
+          // class info (UK Rail only - Rejseplanen never populates classesAvailable) still gets
+          // appended below if there is any.
           strcpy(line2[numMessages],"");
-          if (station.service[0].opco[0]) {
-            if (station.origin[0]) {
-              sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette er %s-toget fra %s.":"This is the %s service from %s.",station.service[0].opco,station.origin);
-            } else {
-              sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette er %s-toget.":"This is the %s service.",station.service[0].opco);
-            }
-          } else {
-            if (station.origin[0]) {
-              sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Toget k\xF8rte oprindeligt fra %s.":"This service originated at %s.",station.origin);
-            }
-          }
           // Add the seating if available
           switch (station.service[0].classesAvailable) {
             case 1:
@@ -3589,11 +3581,14 @@ void departureBoardLoop() {
     const char *effTime = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
     int h=0,m=0;
     sscanf(effTime,"%d:%d",&h,&m);
-    int deltaMin = (h*60+m) - getTimeInMinutes();
-    if (deltaMin < -60) deltaMin += 1440; // midnight rollover - actually tomorrow's early departure, not overdue
+    long deltaSec = (long)(h*3600+m*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+    if (deltaSec < -3600) deltaSec += 86400; // midnight rollover - actually tomorrow's early departure, not overdue
     char fingerprint[64];
     snprintf(fingerprint,sizeof(fingerprint),"%s|%s",station.service[0].sTime,station.service[0].destination);
-    if (deltaMin <= -1 && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
+    // S-tog runs frequently enough during busy periods that leaving a departed service up for the
+    // usual full minute makes the board feel stale - clear it after half a minute instead there.
+    long departedThresholdSec = useSTogStyle(0) ? -30 : -60;
+    if (deltaSec <= departedThresholdSec && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
