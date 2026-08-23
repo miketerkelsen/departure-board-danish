@@ -42,10 +42,6 @@
 #include <weatherClient.h>
 #include <sharedDataStructs.h>
 #include <responseCodes.h>
-#include <raildataXmlClient.h>
-#include <rdmRailClient.h>
-#include <TfLdataClient.h>
-#include <busDataClient.h>
 #include <rejseplanenClient.h>
 #include <githubClient.h>
 #include <rssClient.h>
@@ -74,7 +70,7 @@ static const char contentTypeHtml[] = "text/html";
 
 // Using NTP to set and maintain the clock
 static struct tm timeinfo;
-static const char ukTimezone[] = "GMT0BST,M3.5.0/1,M10.5.0";
+static const char defaultTimezone[] = "CET-1CEST,M3.5.0,M10.5.0/3"; // Denmark (CET/CEST)
 
 // Default hostname
 static const char defaultHostname[] = "DeparturesBoard";
@@ -303,10 +299,6 @@ static const uint8_t UndergroundClock8[150] U8G2_FONT_SECTION("UndergroundClock8
   "\251\310\250\26\31\233\244\2\67\12G\305\70\310\204z\225\2\70\15G\305\251\310h\222\212\214MR\1\71"
   "\15G\305\251\310h\22+\215&\251\0:\6\262\257 \22\0\0\0";
 
-// Service attribution texts
-static const char nrAttributionn[] = "Powered by National Rail Enquiries";
-static const char rdgAttribution[] = "Powered by Rail Delivery Group";
-static const char btAttribution[] = "Powered by bustimes.org";
 
 // Danish weekday/month names - strftime()'s %a/%b/%B always come out in English on this platform
 // (the ESP32 Arduino/newlib build has no da_DK locale data compiled in, so setlocale() can't help
@@ -332,7 +324,6 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
 #define DATAUPDATEINTERVAL 90000      // How often we fetch data from National Rail (ms - 1.5 mins) - "default" option
 #define FASTDATAUPDATEINTERVAL 45000  // How often we fetch data from National Rail (ms - 45 secs) - "fast" option
-#define UGDATAUPDATEINTERVAL 30000    // How often we fetch data from TfL (ms - 30 secs)
 #define BUSDATAUPDATEINTERVAL 45000   // How often we fetch data from bustimes.org (ms - 45 secs)
 #define RSSUPDATEINTERVAL 600000      // How often to refresh the RSS feed (ms - 10 mins)
 #define WEATHERUPDATEINTERVAL 1200000 // How often to update the weather forecast (ms - 20 mins)
@@ -340,7 +331,6 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 // Reusable data transfer structures
 rdiStation xfrStation;
 stnMessages xfrMessages;
-busTubeStation xfrBusTubeStation;
 sharedBufferSpace jsonKeyBuffer;
 
 // Station Data (shared)
@@ -349,10 +339,6 @@ rdStation station;
 stnMessages messages;
 
 // Data transfer clients
-rdmRailClient rdmRailData(&xfrStation,&xfrMessages,&jsonKeyBuffer);
-raildataXmlClient darwinRailData(&xfrStation,&xfrMessages,&jsonKeyBuffer);
-TfLdataClient tfldata(&xfrBusTubeStation,&xfrMessages,&jsonKeyBuffer);
-busDataClient busdata(&xfrBusTubeStation,&jsonKeyBuffer);
 rejseplanenClient rejseplanenData(&xfrStation,&xfrMessages,&jsonKeyBuffer);
 weatherClient currentWeather(&jsonKeyBuffer);
 rssClient rss(&jsonKeyBuffer);
@@ -379,7 +365,6 @@ static bool showDataIcon = false;          // Show the data transfer indicator?
 static bool updateIconVisible = false;     // Is the data update icon visible?
 static bool dateEnabled = true;            // Showing the date on screen?
 static bool weatherEnabled = false;        // Showing weather at station location. Requires an OpenWeatherMap API key.
-static bool enableBus = false;             // Include Bus services on the board?
 static bool firmwareUpdates = true;        // Check for and install firmware updates automatically at boot?
 static bool dailyUpdateCheck = false;      // Check for and install firmware updates at midnight?
 static byte sleepStarts = 0;               // Hour at which the overnight sleep (screensaver) begins
@@ -404,7 +389,6 @@ static bool flipScreen = false;            // Rotate screen 180deg
 static String timezone = "";               // custom (non UK) timezone for the clock
 static bool hidePlatform = false;          // Hide platform numbers on Rail board?
 static bool hideOrdinals = false;          // Hide service ordinals (2nd, 3rd, 4th etc.)
-static bool showLastSeen = false;          // Include last reported arrival after the calling at list
 static bool showFullCalling = true;        // Wait for the "Calling at" list to finish scrolling before changing the primary service
 static bool showFullMsgs = true;           // Wait for the current service message or RSS feed to finish scrolling before changing primary service
 static bool showServiceMsgs = true;        // Show station and service messages (rail/tube)
@@ -414,7 +398,6 @@ static int prevUpdateCheckDay;             // Day of the month the last daily fi
 static unsigned long fwUpdateCheckTimer=0; // Next time to check if the day has rolled over for firmware update check
 static bool apiKeys = false;               // Does apikeys.json exist?
 static bool touchEnabled = false;          // TTP223 Touch Sensor installed?
-static bool useRDMclient = false;          // Use the new Rail Data Marketplace API instead of Darwin Lite
 static bool enableScheduler = false;
 static bool enableCarousel = false;
 static int numCarouselSlots = 0;
@@ -435,9 +418,6 @@ static char locationFilter[MAXFILTERSIZE];
 static char locationCleanFilter[MAXFILTERSIZE];
 static float locationLat=0;
 static float locationLon=0;
-static bool railIsSet = false;
-static bool tubeIsSet = false;
-static bool busIsSet = false;
 static bool dkRailIsSet = false;
 static bool letbaneIsSet = false;
 static bool dkBusIsSet = false;
@@ -447,14 +427,7 @@ static bool carouselActive = false;
 static int activeSlotEventTime;
 static int nextSlotEventTime;
 
-static char nrToken[37] = "";              // National Rail Darwin Lite Tokens are in the format nnnnnnnn-nnnn-nnnn-nnnn-nnnnnnnnnnnn, where each 'n' represents a hexadecimal character (0-9 or a-f).
-static String rdmDeparturesApiKey = "";    // RDM Consumer key for DeparturesBoard API
-static String rdmServiceApiKey = "";       // RDM Consumer key for ServiceDetails API
-static char tflAppKey[33] = "";            // TfL app_key (not usually needed)
-static char callingCrsCode[4] = "";        // Station code to filter routes on
 static char callingStation[45] = "";       // Calling filter station friendly name
-static char lineId[33];                    // Underground line to filter on
-static char lineDirection[9];              // Underground direction filter
 static int busDestX;                       // Variable margin for bus destination
 
 static char rejseplanenKey[37] = "";        // Rejseplanen API 2.0 accessId
@@ -465,26 +438,12 @@ enum boardModes {
   MODE_LOADCONFIG = -1,
   MODE_NEXTMODE = -2,
   MODE_NEXTSCHEDULE = -3,
-  MODE_RAIL = 0,
-  MODE_TUBE = 1,
-  MODE_BUS = 2,
   MODE_DKRAIL = 3,
   MODE_LETBANE = 4,
   MODE_DKBUS = 5,
   MODE_STOG = 6
 };
-boardModes boardMode = MODE_RAIL;
-
-// National Rail entry point
-#define MAXHOSTSIZE 48                     // Maximum size of the wsdl Host
-#define MAXAPIURLSIZE 48                   // Maximum size of the wsdl url
-static char wsdlHost[MAXHOSTSIZE];         // wsdl Host name
-static char wsdlAPI[MAXAPIURLSIZE];        // wsdl API url
-
-// Coach class availability
-static const char firstClassSeating[] = " First class seating only.";
-static const char standardClassSeating[] = " Standard class seating only.";
-static const char dualClassSeating[] = " First and Standard class seating available.";
+boardModes boardMode = MODE_DKRAIL;
 
 // Animation
 #define frameTimeRail 25
@@ -952,7 +911,7 @@ void drawStartupHeading() {
 void drawStationHeader(const char *stopName, const char *callingStopName, const char *platFilter, const int timeOffset) {
 
   // Clear the top line
-  if (boardMode == MODE_TUBE || boardMode == MODE_BUS || boardMode == MODE_LETBANE || boardMode == MODE_DKBUS) {
+  if (boardMode == MODE_LETBANE || boardMode == MODE_DKBUS) {
     blankArea(0,ULINE0,256,ULINE1-1);
   } else {
     blankArea(0,LINE0,256,LINE1-1);
@@ -969,7 +928,7 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
     strlcat(boardTitle,offset,sizeof(boardTitle));
   }
   if (platFilter[0]) {
-    strlcat(boardTitle,(boardMode == MODE_BUS)?"\x8E":"\x8D",sizeof(boardTitle));
+    strlcat(boardTitle,"\x8D",sizeof(boardTitle));
     strlcat(boardTitle,platFilter,sizeof(boardTitle));
     strlcat(boardTitle," ",sizeof(boardTitle));
   }
@@ -988,11 +947,7 @@ void drawStationHeader(const char *stopName, const char *callingStopName, const 
     int const dateY=55;
     // Get the date
     char sysTime[29];
-    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS || boardMode==MODE_STOG) {
-      sprintf(sysTime,"%s %02d %s",dkWeekdayShort[timeinfo.tm_wday],timeinfo.tm_mday,dkMonthShort[timeinfo.tm_mon]);
-    } else {
-      strftime(sysTime,29,"%a %d %b",&timeinfo);
-    }
+    sprintf(sysTime,"%s %02d %s",dkWeekdayShort[timeinfo.tm_wday],timeinfo.tm_mday,dkMonthShort[timeinfo.tm_mon]);
     dateWidth = getMixedStringWidth(sysTime,accentFont);
     dateDay = timeinfo.tm_mday;
     if (callingStopName[0] || boardTitleWidth+dateWidth+10+titleOffset>=SCREEN_WIDTH) {
@@ -1145,11 +1100,7 @@ void drawSleepingScreen() {
   u8g2.clearBuffer();
   if (sleepClock) {
     sprintf(sysTime,"%02d:%02d",timeinfo.tm_hour,timeinfo.tm_min);
-    if (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS || boardMode==MODE_STOG) {
-      sprintf(sysDate,"%d. %s %d",timeinfo.tm_mday,dkMonthLong[timeinfo.tm_mon],timeinfo.tm_year+1900);
-    } else {
-      strftime(sysDate,29,"%d %B %Y",&timeinfo);
-    }
+    sprintf(sysDate,"%d. %s %d",timeinfo.tm_mday,dkMonthLong[timeinfo.tm_mon],timeinfo.tm_year+1900);
 
     // Measure sysDate with the font it's actually drawn in (NatRailSmall9, set below) rather than
     // whatever font happened to be active beforehand - otherwise the random x position is sized
@@ -1177,7 +1128,7 @@ void showUpdateIcon(bool show) {
     } else {
       u8g2.setFont(NatRailTall12);
       u8g2.drawStr(0,50,"}");
-      if (boardMode == MODE_TUBE) u8g2.setFont(Underground10);
+      if (boardMode == MODE_LETBANE) u8g2.setFont(Underground10);
       else u8g2.setFont(NatRailSmall9);
     }
     updateIconVisible = true;
@@ -1208,15 +1159,6 @@ void showNoDataScreen() {
   char msg[60];
   u8g2.setFont(NatRailTall12);
   switch (boardMode) {
-    case MODE_RAIL:
-      sprintf(msg,"No data available for station code \"%s\".",locationCode);
-      break;
-    case MODE_TUBE:
-      strcpy(msg,"No data available for the selected station.");
-      break;
-    case MODE_BUS:
-      strcpy(msg,"No data available for the selected bus stop.");
-      break;
     case MODE_DKRAIL:
       sprintf(msg,"No data available for stop id \"%s\".",locationCode);
       break;
@@ -1262,44 +1204,12 @@ void showSetupCrsHelpScreen() {
   u8g2.sendBuffer();
 }
 
-void showWsdlFailureScreen() {
-  u8g2.clearBuffer();
-  u8g2.setFont(NatRailTall12);
-  centreText("The National Rail data feed is unavailable.",-1);
-  u8g2.setFont(NatRailSmall9);
-  centreText("WDSL entry point could not be accessed, so the",14);
-  centreText("Departures Board cannot be loaded.",26);
-  centreText("Please try again later. :(",40);
-  u8g2.sendBuffer();
-}
-
 void showTokenErrorScreen() {
   char msg[60];
   noServiceClockIsActive = false;
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  switch (boardMode) {
-    case MODE_RAIL:
-      if (useRDMclient) {
-        centreText("Access to the Rail Delivery Group api denied.",-1);
-      } else {
-        centreText("Access to the National Rail database denied.",-1);
-        strcpy(nrToken,"");
-      }
-      break;
-    case MODE_TUBE:
-      centreText("Access to the TfL database denied.",-1);
-      break;
-    case MODE_BUS:
-      centreText("Access to the bustimes database denied.",-1);
-      break;
-    case MODE_DKRAIL:
-    case MODE_LETBANE:
-    case MODE_DKBUS:
-    case MODE_STOG:
-      centreText("Access to the Rejseplanen database denied.",-1);
-      break;
-  }
+  centreText("Access to the Rejseplanen database denied.",-1);
   u8g2.setFont(NatRailSmall9);
   centreText("You must enter a valid api key, please",14);
   centreText("check you have entered it correctly below:",26);
@@ -1313,23 +1223,7 @@ void showCRSErrorScreen() {
   u8g2.clearBuffer();
   char msg[60];
   u8g2.setFont(NatRailTall12);
-  switch (boardMode) {
-    case MODE_RAIL:
-      sprintf(msg,"The station code \"%s\" is not valid.",locationCode);
-      break;
-    case MODE_TUBE:
-      strcpy(msg,"The Underground station is not valid");
-      break;
-    case MODE_BUS:
-      sprintf(msg,"The atco code \"%s\" is not valid.",locationCode);
-      break;
-    case MODE_DKRAIL:
-    case MODE_LETBANE:
-    case MODE_DKBUS:
-    case MODE_STOG:
-      sprintf(msg,"The Rejseplanen stop id \"%s\" is not valid.",locationCode);
-      break;
-  }
+  sprintf(msg,"The Rejseplanen stop id \"%s\" is not valid.",locationCode);
   centreText(msg,-1);
   u8g2.setFont(NatRailSmall9);
   centreText("Please ensure you have selected a valid station.",14);
@@ -1506,24 +1400,8 @@ void loadApiKeys() {
       if (!error) {
         JsonObject settings = doc.as<JsonObject>();
 
-        if (settings["rdmDepKey"].is<const char*>()) {
-          rdmDeparturesApiKey = settings["rdmDepKey"].as<String>();
-        }
-
-        if (settings["rdmSvcKey"].is<const char*>()) {
-          rdmServiceApiKey = settings["rdmSvcKey"].as<String>();
-        }
-
-        if (settings["nrToken"].is<const char*>()) {
-          strlcpy(nrToken, settings["nrToken"], sizeof(nrToken));
-        }
-
         if (settings["owmToken"].is<const char*>()) {
           strlcpy(openWeatherMapApiKey, settings["owmToken"], sizeof(openWeatherMapApiKey));
-        }
-
-        if (settings["appKey"].is<const char*>()) {
-          strlcpy(tflAppKey,settings["appKey"],sizeof(tflAppKey));
         }
 
         if (settings["rejseplanenKey"].is<const char*>()) {
@@ -1541,9 +1419,6 @@ void loadApiKeys() {
 
 void resetLocationIds() {
   strcpy(locationCode,"");
-  railIsSet = false;
-  tubeIsSet = false;
-  busIsSet = false;
   dkRailIsSet = false;
   letbaneIsSet = false;
   dkBusIsSet = false;
@@ -1555,9 +1430,9 @@ void saveFirmwareInfo() {
   saveFile("/fw.json",fw);
 }
 
-// Write a default config file so that the Web GUI works initially (force Tube mode if no NR token)
+// Write a default config file so that the Web GUI works initially
 void writeDefaultConfig() {
-  String defaultConfig = "{\"crs\":\"\",\"station\":\"\",\"lat\":0,\"lon\":0,\"weather\":true,\"sleep\":false,\"showDate\":true,\"showBus\":false,\"update\":true,\"sleepStarts\":23,\"sleepEnds\":8,\"brightness\":20,\"tubeId\":\"\",\"tubeName\":\"\",\"mode\":" + String((!nrToken[0] && rdmDeparturesApiKey=="")?"1":"0") + "}";
+  String defaultConfig = "{\"lat\":0,\"lon\":0,\"weather\":true,\"sleep\":false,\"showDate\":true,\"update\":true,\"sleepStarts\":23,\"sleepEnds\":8,\"brightness\":20,\"mode\":3}"; // mode 3 = MODE_DKRAIL ("Tog")
   saveFile("/config.json",defaultConfig);
   resetLocationIds();
   saveFirmwareInfo();
@@ -1580,112 +1455,34 @@ int getTimeInMinutes() {
 
 void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
   if (requestedMode == MODE_NEXTMODE) {
-    // Circular order: RAIL -> TUBE -> BUS -> DKRAIL -> LETBANE -> DKBUS -> STOG -> (back to RAIL)
+    // Circular order: DKRAIL (Tog) -> STOG (S-tog) -> LETBANE (Letbane) -> DKBUS (Bus) -> (back to Tog)
     switch (boardMode) {
-      case MODE_RAIL:
-        if (tubeIsSet) boardMode = MODE_TUBE;
-        else if (busIsSet) boardMode = MODE_BUS;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        break;
-      case MODE_TUBE:
-        if (busIsSet) boardMode = MODE_BUS;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        else if (railIsSet) boardMode = MODE_RAIL;
-        break;
-      case MODE_BUS:
-        if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        else if (railIsSet) boardMode = MODE_RAIL;
-        else if (tubeIsSet) boardMode = MODE_TUBE;
-        break;
       case MODE_DKRAIL:
+        if (stogIsSet) boardMode = MODE_STOG;
+        else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        break;
+      case MODE_STOG:
         if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        else if (railIsSet) boardMode = MODE_RAIL;
-        else if (tubeIsSet) boardMode = MODE_TUBE;
-        else if (busIsSet) boardMode = MODE_BUS;
+        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         break;
       case MODE_LETBANE:
         if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        else if (railIsSet) boardMode = MODE_RAIL;
-        else if (tubeIsSet) boardMode = MODE_TUBE;
-        else if (busIsSet) boardMode = MODE_BUS;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        else if (stogIsSet) boardMode = MODE_STOG;
         break;
       case MODE_DKBUS:
-        if (stogIsSet) boardMode = MODE_STOG;
-        else if (railIsSet) boardMode = MODE_RAIL;
-        else if (tubeIsSet) boardMode = MODE_TUBE;
-        else if (busIsSet) boardMode = MODE_BUS;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        else if (stogIsSet) boardMode = MODE_STOG;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        break;
-      case MODE_STOG:
-        if (railIsSet) boardMode = MODE_RAIL;
-        else if (tubeIsSet) boardMode = MODE_TUBE;
-        else if (busIsSet) boardMode = MODE_BUS;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         break;
     }
   } else {
     if (slot["mode"].is<int>()) boardMode = slot["mode"];
-    else if (slot["tube"].is<bool>()) boardMode = slot["tube"] ? MODE_TUBE : MODE_RAIL; // handle legacy v1.x config
   }
 
   switch (boardMode) {
-    case MODE_RAIL:
-      if (slot["crs"].is<const char*>())              strlcpy(locationCode, slot["crs"], sizeof(locationCode));
-      if (slot["platformFilter"].is<const char*>())   strlcpy(locationFilter, slot["platformFilter"], sizeof(locationFilter));
-      if (slot["callingCrs"].is<const char*>())       strlcpy(callingCrsCode, slot["callingCrs"], sizeof(callingCrsCode));
-      if (slot["callingStation"].is<const char*>())   strlcpy(callingStation, slot["callingStation"], sizeof(callingStation));
-      if (slot["lat"].is<float>())                    locationLat = slot["lat"];
-      if (slot["lon"].is<float>())                    locationLon = slot["lon"];
-      break;
-
-    case MODE_TUBE:
-      if (slot["tubeId"].is<const char*>())     strlcpy(locationCode, slot["tubeId"], sizeof(locationCode));
-      if (slot["lineid"].is<const char*>())     strlcpy(lineId, slot["lineid"], sizeof(lineId));
-      if (slot["direction"].is<const char*>())  strlcpy(lineDirection, slot["direction"], sizeof(lineDirection));
-      if (isDefault) {
-        if (slot["tubeName"].is<const char*>()) strlcpy(locationName, slot["tubeName"], sizeof(locationName));
-        if (slot["tubeLat"].is<float>())      locationLat = slot["tubeLat"];
-        if (slot["tubeLon"].is<float>())      locationLon = slot["tubeLon"];
-        pruneFromPhrase(locationName," Underground Station");
-        pruneFromPhrase(locationName," DLR Station");
-        pruneFromPhrase(locationName," (H&C Line)");
-      } else {
-        if (slot["name"].is<const char*>()) strlcpy(locationName, slot["name"], sizeof(locationName));
-        if (slot["lat"].is<float>())          locationLat = slot["lat"];
-        if (slot["lon"].is<float>())          locationLon = slot["lon"];
-      }
-      break;
-
-    case MODE_BUS:
-      if (slot["busId"].is<const char*>())      strlcpy(locationCode, slot["busId"], sizeof(locationCode));
-      if (slot["busFilter"].is<const char*>())  strlcpy(locationFilter, slot["busFilter"], sizeof(locationFilter));
-      if (isDefault) {
-        if (slot["busName"].is<const char*>())    strlcpy(locationName, slot["busName"], sizeof(locationName));
-        if (slot["busLat"].is<float>())           locationLat = slot["busLat"];
-        if (slot["busLon"].is<float>())           locationLon = slot["busLon"];
-      } else {
-        if (slot["name"].is<const char*>())   strlcpy(locationName, slot["name"], sizeof(locationName));
-        if (slot["lat"].is<float>())          locationLat = slot["lat"];
-        if (slot["lon"].is<float>())          locationLon = slot["lon"];
-      }
-      break;
-
     case MODE_DKRAIL:
       if (slot["dkCrs"].is<const char*>())            strlcpy(locationCode, slot["dkCrs"], sizeof(locationCode));
       if (slot["dkCallingStopId"].is<const char*>())  strlcpy(dkCallingStopId, slot["dkCallingStopId"], sizeof(dkCallingStopId));
@@ -1759,10 +1556,8 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
 
   // Set defaults
   strcpy(hostname,defaultHostname);
-  strcpy(lineId,"all");
-  strcpy(lineDirection,"");
 
-  timezone = String(ukTimezone);
+  timezone = String(defaultTimezone);
   resetLocationIds();
 
   schedulerActive = false;
@@ -1776,19 +1571,13 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         JsonObject settings = doc.as<JsonObject>();
 
         // Load common settings
-        if (settings["crs"].is<const char*>() && strlen(settings["crs"])) railIsSet = true; else railIsSet = false;
-        if (settings["tubeId"].is<const char*>() && strlen(settings["tubeId"])) tubeIsSet = true; else tubeIsSet = false;
-        if (settings["busId"].is<const char*>() && strlen(settings["busId"])) busIsSet = true; else busIsSet = false;
         if (settings["dkCrs"].is<const char*>() && strlen(settings["dkCrs"])) dkRailIsSet = true; else dkRailIsSet = false;
         if (settings["letbaneId"].is<const char*>() && strlen(settings["letbaneId"])) letbaneIsSet = true; else letbaneIsSet = false;
         if (settings["dkBusId"].is<const char*>() && strlen(settings["dkBusId"])) dkBusIsSet = true; else dkBusIsSet = false;
         if (settings["stogId"].is<const char*>() && strlen(settings["stogId"])) stogIsSet = true; else stogIsSet = false;
 
         if (settings["hostname"].is<const char*>())   strlcpy(hostname, settings["hostname"], sizeof(hostname));
-        if (settings["wsdlHost"].is<const char*>())   strlcpy(wsdlHost, settings["wsdlHost"], sizeof(wsdlHost));
-        if (settings["wsdlAPI"].is<const char*>())    strlcpy(wsdlAPI, settings["wsdlAPI"], sizeof(wsdlAPI));
         if (settings["showDate"].is<bool>())          dateEnabled = settings["showDate"];
-        if (settings["showBus"].is<bool>())           enableBus = settings["showBus"];
         if (settings["showFullCalling"].is<bool>())   showFullCalling = settings["showFullCalling"];
         if (settings["showFullMsgs"].is<bool>())      showFullMsgs = settings["showFullMsgs"];
         if (settings["showClockNoServices"].is<bool>()) showClockNoServices = settings["showClockNoServices"];
@@ -1813,7 +1602,6 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["nrTimeOffset"].is<int>())       nrTimeOffset = settings["nrTimeOffset"];
         if (settings["hidePlatform"].is<bool>())      hidePlatform = settings["hidePlatform"];
         if (settings["hideOrdinals"].is<bool>())      hideOrdinals = settings["hideOrdinals"];
-        if (settings["showLastSeen"].is<bool>())      showLastSeen = settings["showLastSeen"];
         if (settings["showTubeLocation"].is<bool>())  showTubeCurrentLocation = settings["showTubeLocation"];
         if (settings["showServiceMsgs"].is<bool>())   showServiceMsgs = settings["showServiceMsgs"];
 
@@ -1827,13 +1615,7 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
 
         if (requestedMode != MODE_NEXTMODE) {
           if (settings[F("mode")].is<int>())            boardMode = settings[F("mode")];
-          else if (settings[F("tube")].is<bool>())      boardMode = settings[F("tube")] ? MODE_TUBE : MODE_RAIL; // handle legacy v1.x config
         }
-
-        if (settings["dataSource"].is<int>())         useRDMclient = (settings["dataSource"]?1:0);
-        // validate the data source against which api keys are available
-        if (nrToken[0] && rdmDeparturesApiKey=="") useRDMclient = false;
-        else if (!nrToken[0] && rdmDeparturesApiKey!="") useRDMclient = true;
 
         if (coldBoot) {
           // Just load base parameters at boot, clock not set yet so exit
@@ -1989,7 +1771,7 @@ void softResetBoard(boardModes requestedMode) {
   if (timezone!="") {
     setenv("TZ",timezone.c_str(),1);
   } else {
-    setenv("TZ",ukTimezone,1);
+    setenv("TZ",defaultTimezone,1);
   }
   tzset();
   u8g2.clearBuffer();
@@ -2031,43 +1813,16 @@ void softResetBoard(boardModes requestedMode) {
 
   if (rssEnabled && prevRssUrl != rssURL) {
     rssMessage[0] = '\0';
-    if (boardMode == MODE_RAIL || boardMode == MODE_TUBE) {
+    if (boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_STOG) {
       prevProgressBarPosition = 95;
       progressBar("Updating RSS headlines feed",50);
       updateRssFeed();
     }
-  } else if (rssEnabled && previousMode != boardMode && boardMode != MODE_BUS && boardMode != MODE_DKBUS) {
+  } else if (rssEnabled && previousMode != boardMode && boardMode != MODE_DKBUS) {
     buildRssMessage();
   }
 
   switch (boardMode) {
-    case MODE_RAIL:
-      checkWeatherUpdate(prevLat,prevLon);
-      // Create a cleaned platform filter (if any)
-      rdmRailData.cleanFilter(locationFilter,locationCleanFilter,sizeof(locationFilter));
-      progressBar("Initialising National Rail interface",70);
-      if (!useRDMclient) {
-        // Using legacy XML client
-        int res = darwinRailData.init(wsdlHost, wsdlAPI);
-        if (res != UPD_SUCCESS) {
-          showWsdlFailureScreen();
-          while (true) { delay(1);}
-        }
-      }
-      break;
-
-    case MODE_TUBE:
-      checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialising TfL interface",70);
-      break;
-
-    case MODE_BUS:
-      checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialising BusTimes interface",70);
-      // Create a cleaned filter
-      busdata.cleanFilter(locationFilter,locationCleanFilter,sizeof(locationFilter));
-      break;
-
     case MODE_DKRAIL:
       checkWeatherUpdate(prevLat,prevLon);
       progressBar("Initialising Rejseplanen interface",70);
@@ -2107,7 +1862,7 @@ void switchToNextMode() {
     softResetBoard(MODE_LOADCONFIG);
   }
   else if (schedulerActive) softResetBoard(MODE_NEXTSCHEDULE);
-  else if (railIsSet+tubeIsSet+busIsSet+dkRailIsSet+letbaneIsSet+dkBusIsSet+stogIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
+  else if (dkRailIsSet+letbaneIsSet+dkBusIsSet+stogIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
 }
 
 // WiFiManager callback, entered config mode
@@ -2176,7 +1931,7 @@ bool checkForFirmwareUpdate() {
 
     case HTTP_UPDATE_OK:
       for (int i=20;i>=0;i--) {
-        showUpdateCompleteScreen(msgTitle,"The firmware update has completed successfully.","For more information visit the URL below:","github.com/gadec-uk/departures-board/releases",i,true);
+        showUpdateCompleteScreen(msgTitle,"The firmware update has completed successfully.","For more information visit the URL below:","github.com/miketerkelsen/departure-board-danish/releases",i,true);
         delay(1000);
       }
       ESP.restart();
@@ -2381,14 +2136,14 @@ void drawPrimaryService(bool showVia) {
   }
   if (sTogStyle && !station.service[0].isCancelled) {
     sTogCountdownText(station.service[0],etd,sizeof(etd));
-  } else if (isDigit(station.service[0].etd[0])) sprintf(etd,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Forventet %s":"Exp %s",station.service[0].etd);
+  } else if (isDigit(station.service[0].etd[0])) sprintf(etd,"Forventet %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
   int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
   u8g2.drawStr(SCREEN_WIDTH - etdWidth,LINE1-1,etd);
   int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
   if (station.platformAvailable && station.service[0].platform[0] && station.service[0].serviceType == TRAIN && !hidePlatform) {
-    sprintf(plat,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Spor %.7s":"Plat %.7s",station.service[0].platform);
+    sprintf(plat,"Spor %.7s",station.service[0].platform);
     int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);;
     u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,LINE1-1,plat);
     spaceAvailable-=(platWidth+7);
@@ -2427,21 +2182,7 @@ void drawServiceLine(int line, int y) {
   char plat[14]; // was 9 - see the matching comment in drawPrimaryService()
   int destPos;
 
-  if (boardMode==MODE_DKRAIL || boardMode==MODE_STOG) {
-    sprintf(ordinal,"%d. ",line+1);
-  } else {
-    switch (line) {
-      case 1:
-        strcpy(ordinal,"2nd ");
-        break;
-      case 2:
-        strcpy(ordinal,"3rd ");
-        break;
-      default:
-        sprintf(ordinal,"%dth ",line+1);
-        break;
-    }
-  }
+  sprintf(ordinal,"%d. ",line+1);
 
   setSmallFont();
   blankArea(0,y,256,9);
@@ -2468,14 +2209,14 @@ void drawServiceLine(int line, int y) {
     char etd[16];
     if (sTogStyle && !station.service[line].isCancelled) {
       sTogCountdownText(station.service[line],etd,sizeof(etd));
-    } else if (isDigit(station.service[line].etd[0])) sprintf(etd,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Forventet %s":"Exp %s",station.service[line].etd);
+    } else if (isDigit(station.service[line].etd[0])) sprintf(etd,"Forventet %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
     int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
     u8g2.drawStr(SCREEN_WIDTH - etdWidth,y-1,etd);
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
     if (station.platformAvailable && !hidePlatform && station.service[line].platform[0] && station.service[line].serviceType == TRAIN) {
-      sprintf(plat,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Spor %.7s":"Plat %.7s",station.service[line].platform);
+      sprintf(plat,"Spor %.7s",station.service[line].platform);
       int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);
       u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat);
       spaceAvailable-=(platWidth+7);
@@ -2489,19 +2230,15 @@ void drawServiceLine(int line, int y) {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
       centreText(weatherMsg,y-1);
-    } else if (boardMode!=MODE_DKRAIL && boardMode!=MODE_STOG) {
-      // We're showing the mandatory attribution (not shown on the Danish rail board - no
-      // attribution requirement from Rejseplanen, and the user asked for it removed)
-      centreText(useRDMclient?rdgAttribution:nrAttributionn,y-1);
     }
+    // No attribution shown here - Rejseplanen has no attribution requirement, and this board is
+    // Danish-only (see MODE_DKRAIL/MODE_STOG, the only two modes that ever draw this row).
   }
 }
 
-// Is this scrolling message line the "calling at" / "stopper ved" message? (Danish and English
-// prefixes are conveniently both 7 characters, so every existing strncmp(...,7) site can just
-// call this instead of hard-coding "Calling".)
+// Is this scrolling message line the "Stopper ved" (calling points) message?
 bool isCallingMessage(const char* msg) {
-  return strncmp((boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Stopper":"Calling",msg,7)==0;
+  return strncmp("Stopper",msg,7)==0;
 }
 
 // Draw the initial Departures Board
@@ -2530,7 +2267,7 @@ void drawStationBoard() {
   msgWidth = SCREEN_WIDTH;
 
   if (!noServiceClockIsActive) {
-    drawStationHeader((boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?locationName:station.location,callingStation,locationFilter,nrTimeOffset);
+    drawStationHeader(locationName,callingStation,locationFilter,nrTimeOffset);
 
     // Draw the primary service line
     isShowingVia=false;
@@ -2553,59 +2290,23 @@ void drawStationBoard() {
         }
         if (station.calling[0]) {
           // Add the calling stops message
-          sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Stopper ved: %s":"Calling at: %s",station.calling);
+          sprintf(line2[numMessages],"Stopper ved: %s",station.calling);
           numMessages++;
         }
-        // On the UK board this is inferred by comparing the service's origin against the current
-        // station name; Rejseplanen's client already leaves station.origin blank whenever the
-        // requested stop IS the origin, so use that directly for DK Rail.
-        bool startsHere = (boardMode==MODE_DKRAIL||boardMode==MODE_STOG) ? !station.origin[0] : (strcmp(station.origin, station.location)==0);
-        if (startsHere) {
+        // Rejseplanen's client leaves station.origin blank whenever the requested stop IS the
+        // service's origin, so that's a direct signal - no need to compare names.
+        if (!station.origin[0]) {
           // Service originates at this station
           if (station.service[0].opco[0]) {
-            sprintf(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette %s-tog starter her.":"This %s service starts here.",station.service[0].opco);
+            sprintf(line2[numMessages],"Dette %s-tog starter her.",station.service[0].opco);
           } else {
-            strcpy(line2[numMessages],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Dette tog starter her.":"This service starts here.");
-          }
-          // Add the seating if available
-          switch (station.service[0].classesAvailable) {
-            case 1:
-              strcat(line2[numMessages],firstClassSeating);
-              break;
-            case 2:
-              strcat(line2[numMessages],standardClassSeating);
-              break;
-            case 3:
-              strcat(line2[numMessages],dualClassSeating);
-              break;
+            strcpy(line2[numMessages],"Dette tog starter her.");
           }
           numMessages++;
-        } else {
-          // Service originates elsewhere - deliberately no "This is the X service from Y."/
-          // "This service originated at Y." message here any more (removed per user request: it
-          // didn't carry any actionable information for a departure board, in any mode). Seating-
-          // class info (UK Rail only - Rejseplanen never populates classesAvailable) still gets
-          // appended below if there is any.
-          strcpy(line2[numMessages],"");
-          // Add the seating if available
-          switch (station.service[0].classesAvailable) {
-            case 1:
-              strcat(line2[numMessages],firstClassSeating);
-              break;
-            case 2:
-              strcat(line2[numMessages],standardClassSeating);
-              break;
-            case 3:
-              strcat(line2[numMessages],dualClassSeating);
-              break;
-          }
-          if (line2[numMessages][0]) numMessages++;
         }
-        if (station.service[0].trainLength) {
-          // Add the number of carriages message (Rejseplanen never populates this, UK only)
-          sprintf(line2[numMessages],"This train is formed of %d coaches.",station.service[0].trainLength);
-          numMessages++;
-        }
+        // No "This is the X service from Y."/"This service originated at Y." message when the
+        // service originates elsewhere any more (removed per user request - it didn't carry any
+        // actionable information for a departure board).
       }
 
       if (noScrolling && station.numServices>1) {
@@ -2614,7 +2315,7 @@ void drawStationBoard() {
     } else {
       blankArea(0,LINE2,256,LINE4-LINE2);
       setTallFont();
-      centreText((boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled services at this station.",LINE1-1);
+      centreText("Der er ingen planlagte afgange fra denne station.",LINE1-1);
     }
   } else {
     msgLine = LINE4;
@@ -2656,9 +2357,7 @@ void drawStationBoard() {
 }
 
 void updateRailDepartures() {
-  if (boardMode == MODE_DKRAIL || boardMode == MODE_STOG) rejseplanenData.loadDepartures(&station,&messages);
-  else if (useRDMclient) rdmRailData.loadDepartures(&station,&messages);
-  else darwinRailData.loadDepartures(&station,&messages);
+  rejseplanenData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
   noDataLoaded = false;
   dataLoadSuccess++;
@@ -2693,8 +2392,7 @@ bool drawCurrentTimeUG() {
     setTubeFont();
 
     if (dateEnabled && timeinfo.tm_mday!=dateDay) {
-      if (boardMode == MODE_TUBE) drawStationHeader(locationName,"","",0);
-      else drawStationHeader(locationName,"",locationFilter,0);
+      drawStationHeader(locationName,"",locationFilter,0);
       u8g2.sendBuffer();  // Just refresh on new date
       setTubeFont();
     }
@@ -2705,8 +2403,7 @@ bool drawCurrentTimeUG() {
 }
 
 void updateArrivals() {
-  if (boardMode == MODE_LETBANE) rejseplanenData.loadDepartures(&station,&messages);
-  else tfldata.loadArrivals(&station,&messages);
+  rejseplanenData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
   noDataLoaded = false;
   dataLoadSuccess++;
@@ -2796,7 +2493,7 @@ void drawUndergroundBoard() {
       if (station.numServices>1) drawUndergroundService(1,ULINE2);
     } else {
       setTubeFont();
-      centreText(boardMode==MODE_LETBANE?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled arrivals at this station.",ULINE1-1);
+      centreText("Der er ingen planlagte afgange fra denne station.",ULINE1-1);
     }
   }
 
@@ -2845,9 +2542,9 @@ void drawBusService(int serviceId, int y, int destPos) {
     drawMixedStr(0,y-1,station.service[serviceId].via,u8g2_font_6x10_tf);
     int etdWidth = 25;
     if (isDigit(station.service[serviceId].etd[0])) {
-      sprintf(etd,boardMode==MODE_DKBUS?"Forventet %s":"Exp %s",station.service[serviceId].etd);
-      etdWidth = (boardMode==MODE_DKBUS) ? getStringWidth(etd)+6 : 47;
-    } else if (boardMode==MODE_DKBUS && station.service[serviceId].etd[0]) {
+      sprintf(etd,"Forventet %s",station.service[serviceId].etd);
+      etdWidth = getStringWidth(etd)+6;
+    } else if (station.service[serviceId].etd[0]) {
       // "Aflyst"/"Rettidig" - show the Danish status word rather than falling back to sTime
       strcpy(etd,station.service[serviceId].etd);
       etdWidth = getStringWidth(etd)+6;
@@ -2904,15 +2601,14 @@ void drawBusDeparturesBoard() {
       if (station.numServices>1) drawBusService(1,ULINE2,busDestX);
     } else {
       u8g2.setFont(NatRailSmall9);
-      centreText(boardMode==MODE_DKBUS?"Der er ingen planlagte afgange fra dette stoppested.":"There are no scheduled services at this stop.",ULINE1-1);
+      centreText("Der er ingen planlagte afgange fra dette stoppested.",ULINE1-1);
     }
   }
   u8g2.sendBuffer();
 }
 
 void updateBusDepartures() {
-  if (boardMode == MODE_DKBUS) rejseplanenData.loadDepartures(&station,&messages);
-  else busdata.loadDepartures(&station);
+  rejseplanenData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
   noDataLoaded = false;
   dataLoadSuccess++;
@@ -2925,21 +2621,12 @@ void updateBusDepartures() {
   }
   busDestX+=5;
   // Rejseplanen has no attribution requirement (and the user asked for it removed), so DK Bus
-  // only ever shows the weather message, if any; bustimes.org's attribution is mandatory and stays.
-  if (boardMode == MODE_DKBUS) {
-    if (weatherEnabled && weatherMsg[0]) {
-      strcpy(line2[0],weatherMsg);
-      messages.numMessages=1;
-    } else {
-      messages.numMessages=0;
-    }
-  } else if (weatherEnabled && weatherMsg[0]) {
+  // only ever shows the weather message, if any.
+  if (weatherEnabled && weatherMsg[0]) {
     strcpy(line2[0],weatherMsg);
-    strcpy(line2[1],btAttribution);
-    messages.numMessages=2;
-  } else{
-    strcpy(line2[0],btAttribution);
     messages.numMessages=1;
+  } else {
+    messages.numMessages=0;
   }
 }
 
@@ -3168,32 +2855,11 @@ void handleInfo(AsyncWebServerRequest *request) {
   message+="\nCurrent location code: " + String(locationCode) + "\nCurrent location name: " + String(locationName) + "\nSuccessful: " + String(dataLoadSuccess) + "\nFailures: " + String(dataLoadFailure) + "\nTime since last data load: " + String((int)((millis()-lastDataLoadTime)/1000)) + " seconds";
   if (dataLoadFailure) message+="\nTime since last failure: " + String((int)((millis()-lastLoadFailure)/1000)) + " seconds";
   message+="\nLast Result: ";
-  switch (boardMode) {
-    case MODE_RAIL:
-      if (useRDMclient) message+="RDMClient: " + String(jsonKeyBuffer.lastResultMessage);
-      else message+="darwinClient: " + String(jsonKeyBuffer.lastResultMessage);
-      break;
-
-    case MODE_TUBE:
-      message+=String(jsonKeyBuffer.lastResultMessage);
-      break;
-
-    case MODE_BUS:
-      message+=String(jsonKeyBuffer.lastResultMessage);
-      break;
-
-    case MODE_DKRAIL:
-    case MODE_LETBANE:
-    case MODE_DKBUS:
-    case MODE_STOG:
-      message+=String(jsonKeyBuffer.lastResultMessage);
-      break;
-  }
+  message+=String(jsonKeyBuffer.lastResultMessage);
   message+="\nUpdate result code: ";
   message+=getResultCodeText(lastUpdateResult);
   message+="\nServices: " + String(station.numServices) + "\nMessages: ";
-  int nMsgs = messages.numMessages;
-  if (boardMode == MODE_TUBE || boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_DKBUS || boardMode == MODE_STOG) nMsgs--;
+  int nMsgs = messages.numMessages - 1;
   message+=String(nMsgs) + "\n";
 
   if (rssEnabled) {
@@ -3425,7 +3091,7 @@ void departureBoardLoop() {
         for (int i=0;i<numMessages;i++) {
           if (isCallingMessage(line2[i])) {
             // refresh the calling at times
-            sprintf(line2[i],(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Stopper ved: %s":"Calling at: %s",station.calling);
+            sprintf(line2[i],"Stopper ved: %s",station.calling);
             break;
           }
         }
@@ -3689,7 +3355,7 @@ void undergroundArrivalsLoop() {
     } else {
       setTubeFont();
       blankArea(0,ULINE1,256,ULINE3-ULINE1);
-      centreText(boardMode==MODE_LETBANE?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled arrivals at this station.",ULINE1-1);
+      centreText("Der er ingen planlagte afgange fra denne station.",ULINE1-1);
     }
     fullRefresh = true;
   }
@@ -3820,7 +3486,7 @@ void undergroundArrivalsLoop() {
     // we're scrolling the primary service(s) into view
     u8g2.setClipWindow(0,ULINE1,256,ULINE1+10);
     if (station.numServices) drawUndergroundService(0,scrollPrimaryYpos+ULINE1-1);
-    else centreText(boardMode==MODE_LETBANE?"Der er ingen planlagte afgange fra denne station.":"There are no scheduled arrivals at this station.",scrollPrimaryYpos+ULINE1-1);
+    else centreText("Der er ingen planlagte afgange fra denne station.",scrollPrimaryYpos+ULINE1-1);
     if (station.numServices>1) {
       u8g2.setClipWindow(0,ULINE2,256,ULINE2+10);
       drawUndergroundService(1,scrollPrimaryYpos+ULINE2-1);
@@ -3871,7 +3537,7 @@ void busDeparturesLoop() {
     } else {
       setSmallFont();
       blankArea(0,ULINE1,256,ULINE3-ULINE1);
-      centreText(boardMode==MODE_DKBUS?"Der er ingen planlagte afgange fra dette stoppested.":"There are no scheduled services at this stop.",ULINE1-1);
+      centreText("Der er ingen planlagte afgange fra dette stoppested.",ULINE1-1);
     }
     fullRefresh = true;
   }
@@ -3957,7 +3623,7 @@ void busDeparturesLoop() {
     // we're scrolling the primary service(s) into view
     u8g2.setClipWindow(0,ULINE1,256,ULINE1+10);
     if (station.numServices) drawBusService(0,scrollPrimaryYpos+ULINE1-1,busDestX);
-    else centreText(boardMode==MODE_DKBUS?"Der er ingen planlagte afgange fra dette stoppested.":"There are no scheduled services at this stop.",scrollPrimaryYpos+ULINE1-1);
+    else centreText("Der er ingen planlagte afgange fra dette stoppested.",scrollPrimaryYpos+ULINE1-1);
     if (station.numServices>1) {
       u8g2.setClipWindow(0,ULINE2,256,ULINE2+10);
       drawBusService(1,scrollPrimaryYpos+ULINE2-1,busDestX);
@@ -3965,11 +3631,6 @@ void busDeparturesLoop() {
     if (station.numServices>2) {
       u8g2.setClipWindow(0,ULINE3,256,ULINE3+10);
       drawBusService(2,scrollPrimaryYpos+ULINE3-1,busDestX);
-    } else if (station.numServices<3 && messages.numMessages==1 && boardMode!=MODE_DKBUS) {
-      // scroll up the attribution once... (not applicable to DK Bus - no attribution requirement,
-      // and it's been removed per the user's request)
-      u8g2.setClipWindow(0,ULINE3,256,ULINE3+10);
-      centreText(btAttribution,scrollPrimaryYpos+ULINE3-1);
     }
     u8g2.setMaxClipWindow();
     scrollPrimaryYpos--;
@@ -4208,22 +3869,6 @@ void fetchDeparturesTask(void *pvParameters) {
     switch (fetchMode) {
       case FETCH_BOARD:
         switch (boardMode) {
-          case MODE_RAIL:
-            if (useRDMclient) {
-              lastUpdateResult = rdmRailData.fetchDepartures(&station,&messages,locationCode,rdmDeparturesApiKey,rdmServiceApiKey,MAXBOARDSERVICES,enableBus,callingCrsCode,locationCleanFilter,nrTimeOffset,(showLastSeen && !noScrolling),showServiceMsgs);
-            } else {
-              lastUpdateResult = darwinRailData.fetchDepartures(&station,&messages,locationCode,nrToken,MAXBOARDSERVICES,enableBus,callingCrsCode,locationCleanFilter,nrTimeOffset,(showLastSeen && !noScrolling),showServiceMsgs);
-            }
-            nextDataUpdate = millis()+apiRefreshRate;
-            break;
-          case MODE_TUBE:
-            lastUpdateResult = tfldata.fetchArrivals(&station,&messages,locationCode,lineId,lineDirection,(noScrolling || !showServiceMsgs),tflAppKey);
-            nextDataUpdate = millis() + UGDATAUPDATEINTERVAL; // default update freq
-            break;
-          case MODE_BUS:
-            lastUpdateResult = busdata.fetchDepartures(&station,locationCode,locationCleanFilter);
-            nextDataUpdate = millis() + BUSDATAUPDATEINTERVAL;
-            break;
           case MODE_DKRAIL:
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,dkProducts,true,dkCallingStopId,nrTimeOffset);
             nextDataUpdate = millis()+apiRefreshRate;
@@ -4272,9 +3917,6 @@ void fetchDeparturesTask(void *pvParameters) {
 //
 void setup(void) {
 
-  // These are the default wsdl XML SOAP entry points. They can be overridden in the config.json file if necessary
-  strlcpy(wsdlHost,"lite.realtime.nationalrail.co.uk",sizeof(wsdlHost));
-  strlcpy(wsdlAPI,"/OpenLDBWS/wsdl.aspx?ver=2021-11-01",sizeof(wsdlAPI));
   u8g2.begin();                       // Start the OLED panel
   u8g2.setContrast(brightness);       // Initial brightness
   u8g2.setDrawColor(1);               // Only a monochrome display, so set the colour to "on"
@@ -4288,8 +3930,6 @@ void setup(void) {
   bool isFSMounted = LittleFS.begin(true);    // Start the File System, format if necessary
   strcpy(station.location,"");                // No default location
   strcpy(weatherMsg,"");                      // No weather message
-  strcpy(nrToken,"");                         // No default National Rail token
-  strcpy(tflAppKey,"");                       // No default TfL app_key
   loadApiKeys();                              // Load the API keys from the apiKeys.json
   loadConfig(true);                           // Load the configuration settings from config.json
   u8g2.setContrast(brightness);               // Set the panel brightness to the user saved level
@@ -4374,7 +4014,7 @@ void setup(void) {
       delete body; // Clean up memory
       request->_tempObject = nullptr;
 
-      if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || request->hasParam("reboot")) {
+      if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || request->hasParam("reboot")) {
         // First time setup or base config change, we need a full reboot
         sendResponse(200,"Configuration saved. The Departures Board will now restart.",request);
         restartTimer.once(1, []() { ESP.restart(); });
@@ -4412,11 +4052,6 @@ void setup(void) {
         if (!saveFile("/apikeys.json", body->c_str())) {
           msg = "Failed to save the API keys to the file system (file system corrupt or full?)";
           result = false;
-        } else {
-          JsonObject settings = doc.as<JsonObject>();
-          String nrToken = settings["nrToken"].as<String>();
-          String rdmDepToken = settings["rdmDepKey"].as<String>();
-          if (!nrToken.length() && !rdmDepToken.length()) msg+="\n\nNote: Only Tube and Bus Departures will be available without either Rail Data or National Rail keys.";
         }
       } else {
         msg = "Invalid JSON format. No changes have been saved.";
@@ -4430,7 +4065,7 @@ void setup(void) {
         // Load/Update the API Keys in memory
         loadApiKeys();
         // If all location codes are blank we're in the setup process. If not, the keys have been changed so just reboot.
-        if (!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) {
+        if (!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) {
           sendResponse(200,msg,request);
           writeDefaultConfig();
           showSetupCrsHelpScreen();
@@ -4559,14 +4194,14 @@ void setup(void) {
   }
   checkPostWebUpgrade();
   // First time configuration?
-  if ((!railIsSet && !tubeIsSet && !busIsSet && !dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || (!nrToken[0] && rdmDeparturesApiKey=="" && boardMode==MODE_RAIL) || (!rejseplanenKey[0] && (boardMode==MODE_DKRAIL || boardMode==MODE_LETBANE || boardMode==MODE_DKBUS || boardMode==MODE_STOG))) {
+  if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || !rejseplanenKey[0]) {
     if (!apiKeys) showSetupKeysHelpScreen();
     else showSetupCrsHelpScreen();
     // First time setup mode will exit with a reboot, so just loop here forever
     while (true) { delay(10); }
   }
 
-  configTzTime(ukTimezone, "uk.pool.ntp.org","time.cloudflare.com","time.windows.com");
+  configTzTime(defaultTimezone, "dk.pool.ntp.org","time.cloudflare.com","time.windows.com");
   if (timezone!="") {
     setenv("TZ",timezone.c_str(),1);
     tzset();
@@ -4599,7 +4234,7 @@ void setup(void) {
   loadConfig();
 
   station.numServices=0;
-  if (rssEnabled && boardMode!=MODE_BUS && boardMode!=MODE_DKBUS) {
+  if (rssEnabled && boardMode!=MODE_DKBUS) {
     progressBar("Loading RSS headlines feed",60);
     updateRssFeed();
   }
@@ -4620,28 +4255,7 @@ void setup(void) {
     0                     // Core 0 (Network/Background core)
   );
 
-  if (boardMode == MODE_RAIL) {
-      if (!useRDMclient) {
-        // Using legacy darwin XML client
-        progressBar("Initialising National Rail interface",67);
-        int res = darwinRailData.init(wsdlHost, wsdlAPI);
-        if (res != UPD_SUCCESS) {
-          showWsdlFailureScreen();
-          while (true) {delay(1);}
-        }
-      }
-      progressBar("Initialising National Rail interface",70);
-      rdmRailData.cleanFilter(locationFilter,locationCleanFilter,sizeof(locationFilter));
-      startupProgressPercent=70;
-  } else if (boardMode == MODE_TUBE) {
-      progressBar("Initialising TfL interface",70);
-      startupProgressPercent=70;
-  } else if (boardMode == MODE_BUS) {
-      progressBar("Initialising BusTimes interface",70);
-      // Create a cleaned filter
-      busdata.cleanFilter(locationFilter,locationCleanFilter,sizeof(locationFilter));
-      startupProgressPercent=70;
-  } else if (boardMode == MODE_DKRAIL) {
+  if (boardMode == MODE_DKRAIL) {
       progressBar("Initialising Rejseplanen interface",70);
       startupProgressPercent=70;
   } else if (boardMode == MODE_LETBANE) {
@@ -4727,18 +4341,6 @@ void loop(void) {
   }
 
   switch (boardMode) {
-    case MODE_RAIL:
-      departureBoardLoop();
-      break;
-
-    case MODE_TUBE:
-      undergroundArrivalsLoop();
-      break;
-
-    case MODE_BUS:
-      busDeparturesLoop();
-      break;
-
     case MODE_DKRAIL:
       departureBoardLoop();
       break;
@@ -4758,7 +4360,7 @@ void loop(void) {
 
   if (manualUpdateCheck && !fetchInProgress) doManualOtaCheck();
 
-  if (rssEnabled && boardMode != MODE_BUS && boardMode != MODE_DKBUS && millis() > nextRssUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+  if (rssEnabled && boardMode != MODE_DKBUS && millis() > nextRssUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
     // Start an RSS Update on Core 0
     fetchMode = FETCH_RSS;
     fetchInProgress = true;
