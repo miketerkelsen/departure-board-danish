@@ -187,11 +187,8 @@
         </div>
 
         <div class="mb-3" id="dkSearchBox" style="display:none">
-          <label class="form-label" for="dkName">Station Name</label>
-          <input id="dkName" type="text" placeholder="A friendly name to show on screen" class="form-control">
-          <label class="form-label mt-2" for="dkCrs">Rejseplanen Stop ID</label>
-          <input id="dkCrs" type="text" maxlength="7" placeholder="e.g. 8600512" class="form-control">
-          <div class="form-text">Find stop IDs by searching your station on <a href="https://www.rejseplanen.dk" target="_blank">rejseplanen.dk</a>.</div>
+          <label class="form-label" for="dkName">Station</label>
+          <input id="dkName" type="text" placeholder="Type the station name" class="form-control typeahead">
 
           <div class="mt-3">
             <label class="form-label">Only show these train types</label>
@@ -208,37 +205,29 @@
             <label class="form-label" for="dkCallingStation">Only show trains heading towards</label>
             <div style="display:flex;gap:10px;">
               <div style="flex:1;">
-                <input id="dkCallingStation" type="text" placeholder="Destination name (optional)" class="form-control">
+                <input id="dkCallingStation" type="text" placeholder="Station name or leave blank for all trains" class="form-control typeahead">
               </div>
-              <div style="flex-shrink:0;width:120px;">
-                <input id="dkCallingStopId" type="text" maxlength="7" placeholder="Stop ID" class="form-control">
+              <div style="flex-shrink:0;">
+                <button id="clearDkCallingStation" name="clearDkCallingStation" class="btn btn-secondary" type="button">Clear</button>
               </div>
             </div>
-            <div class="form-text">Optional - the Rejseplanen stop ID of the last stop on the journey.</div>
           </div>
         </div>
 
         <div class="mb-3" id="letbaneSearchBox" style="display:none">
-          <label class="form-label" for="letbaneName">Letbane Stop Name</label>
-          <input id="letbaneName" type="text" placeholder="A friendly name to show on screen" class="form-control">
-          <label class="form-label mt-2" for="letbaneId">Rejseplanen Stop ID</label>
-          <input id="letbaneId" type="text" maxlength="7" placeholder="e.g. 8608704" class="form-control">
-          <div class="form-text">Either direction's stop ID shows the full combined board for that stop (both directions).</div>
+          <label class="form-label" for="letbaneName">Letbane Stop</label>
+          <input id="letbaneName" type="text" placeholder="Type the stop name" class="form-control typeahead">
+          <div class="form-text">Either direction of a stop shows the full combined board for that stop (both directions) - pick whichever one the search offers.</div>
         </div>
 
         <div class="mb-3" id="dkBusSearchBox" style="display:none">
-          <label class="form-label" for="dkBusName">Bus Stop Name</label>
-          <input id="dkBusName" type="text" placeholder="A friendly name to show on screen" class="form-control">
-          <label class="form-label mt-2" for="dkBusId">Rejseplanen Stop ID</label>
-          <input id="dkBusId" type="text" maxlength="7" placeholder="e.g. 8600512" class="form-control">
-          <div class="form-text">Can be the same stop ID as DK Tog above - buses and trains at a shared hub both use the same underlying stop ID, just filtered differently.</div>
+          <label class="form-label" for="dkBusName">Bus Stop</label>
+          <input id="dkBusName" type="text" placeholder="Type the bus stop name" class="form-control typeahead">
         </div>
 
         <div class="mb-3" id="stogSearchBox" style="display:none">
-          <label class="form-label" for="stogName">S-tog Station Name</label>
-          <input id="stogName" type="text" placeholder="A friendly name to show on screen" class="form-control">
-          <label class="form-label mt-2" for="stogId">Rejseplanen Stop ID</label>
-          <input id="stogId" type="text" maxlength="7" placeholder="e.g. 8600626 (København H)" class="form-control">
+          <label class="form-label" for="stogName">S-tog Station</label>
+          <input id="stogName" type="text" placeholder="Type the station name, e.g. København H" class="form-control typeahead">
           <div class="form-text">A dedicated S-tog board: line-letter badges, minute countdowns, S-tog services only - separate from DK Tog above so you can show both at once (e.g. DK Tog for the intercity board, S-tog for the same or a different station).</div>
         </div>
 
@@ -873,21 +862,26 @@
       validRdgServiceToken: true,
       validRejseplanenKey: true,
       rejseplanenKey: "",
+      dkStationSelected: false,
       dkName: "",
       dkCrs: "",
+      dkCallingStationSelected: false,
       dkCallingStation: "",
       dkCallingStopId: "",
       dkProducts: 31,
       dkLat: 0,
       dkLon: 0,
+      letbaneStationSelected: false,
       letbaneName: "",
       letbaneId: "",
       letbaneLat: 0,
       letbaneLon: 0,
+      dkBusStationSelected: false,
       dkBusName: "",
       dkBusId: "",
       dkBusLat: 0,
       dkBusLon: 0,
+      stogStationSelected: false,
       stogName: "",
       stogId: "",
       stogLat: 0,
@@ -944,15 +938,11 @@
       enableScheduler: document.getElementById('enableScheduler'),
       enableCarousel: document.getElementById('enableCarousel'),
       dkName: document.getElementById('dkName'),
-      dkCrs: document.getElementById('dkCrs'),
       dkCallingStation: document.getElementById('dkCallingStation'),
-      dkCallingStopId: document.getElementById('dkCallingStopId'),
+      clearDkCallingStation: document.getElementById('clearDkCallingStation'),
       letbaneName: document.getElementById('letbaneName'),
-      letbaneId: document.getElementById('letbaneId'),
       dkBusName: document.getElementById('dkBusName'),
-      dkBusId: document.getElementById('dkBusId'),
-      stogName: document.getElementById('stogName'),
-      stogId: document.getElementById('stogId')
+      stogName: document.getElementById('stogName')
     };
 
     document.getElementById('formsettings').addEventListener('keydown', function(e) { if (e.key === 'Enter') e.preventDefault(); });
@@ -1302,6 +1292,30 @@
       };
     };
 
+    // Shared by every DK Tog/Letbane/DK Bus/S-tog station-name search box - all proxy through the
+    // board's own /dkstationpicker (see handleDkStationPicker() in "Departures Board.cpp"), which
+    // does the real Rejseplanen location.name lookup server-side and hands back just {name,id}
+    // pairs, already trimmed down from Rejseplanen's much heavier raw response.
+    const substringMatcherDk = () => {
+      return (q, cb) => {
+        if (q.length > 1) {
+          $.ajax({
+            url: '/dkstationpicker?q=' + encodeURIComponent(q),
+            method: 'GET',
+            success: function (data) {
+              cb(data);
+            },
+            error: function (xhr, status, error) {
+              console.error(`DK stop fetch failed: ${status} - ${error}`);
+              cb([]);
+            }
+          });
+        } else {
+          cb([]);
+        }
+      };
+    };
+
     $(function () {
       $('[data-bs-toggle="tooltip"]').tooltip();
     });
@@ -1342,6 +1356,71 @@
       },
       highlighter: function (item) {
         return '<img src="tube.webp" style="margin-right:6px">' + item;
+      }
+    });
+
+    $(elements.dkName).typeahead({
+      name: 'dkstations',
+      source: substringMatcherDk(),
+      delay: 300,
+      updater: function (item) {
+        handleDkStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="irail.webp" style="margin-right:6px">' + item;
+      }
+    });
+
+    $(elements.dkCallingStation).typeahead({
+      name: 'dkstations',
+      source: substringMatcherDk(),
+      delay: 300,
+      updater: function (item) {
+        handleDkCallingStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="irail.webp" style="margin-right:6px">' + item;
+      }
+    });
+
+    $(elements.letbaneName).typeahead({
+      name: 'dkstations',
+      source: substringMatcherDk(),
+      delay: 300,
+      updater: function (item) {
+        handleLetbaneStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="itube.webp" style="margin-right:6px">' + item;
+      }
+    });
+
+    $(elements.dkBusName).typeahead({
+      name: 'dkstations',
+      source: substringMatcherDk(),
+      delay: 300,
+      updater: function (item) {
+        handleDkBusStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="ibus.webp" style="margin-right:6px">' + item;
+      }
+    });
+
+    $(elements.stogName).typeahead({
+      name: 'dkstations',
+      source: substringMatcherDk(),
+      delay: 300,
+      updater: function (item) {
+        handleStogStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="irail.webp" style="margin-right:6px">' + item;
       }
     });
 
@@ -1766,16 +1845,22 @@
       toggleBusFilterBox();
     });
 
-    elements.dkName.addEventListener('input', function () { appState.dkName = this.value.trim(); });
-    elements.dkCrs.addEventListener('input', function () { appState.dkCrs = this.value.trim(); applyBoardMode(); });
-    elements.dkCallingStation.addEventListener('input', function () { appState.dkCallingStation = this.value.trim(); });
-    elements.dkCallingStopId.addEventListener('input', function () { appState.dkCallingStopId = this.value.trim(); });
-    elements.letbaneName.addEventListener('input', function () { appState.letbaneName = this.value.trim(); });
-    elements.letbaneId.addEventListener('input', function () { appState.letbaneId = this.value.trim(); applyBoardMode(); });
-    elements.dkBusName.addEventListener('input', function () { appState.dkBusName = this.value.trim(); });
-    elements.dkBusId.addEventListener('input', function () { appState.dkBusId = this.value.trim(); applyBoardMode(); });
-    elements.stogName.addEventListener('input', function () { appState.stogName = this.value.trim(); });
-    elements.stogId.addEventListener('input', function () { appState.stogId = this.value.trim(); applyBoardMode(); });
+    // DK Tog/Letbane/DK Bus/S-tog station fields are name-search typeaheads (see substringMatcherDk()
+    // and the handle*Selected()/handle*LostFocus() functions below), same pattern as the National
+    // Rail searchName box above - the underlying Rejseplanen stop id is never shown or hand-typed,
+    // only ever set by picking a match, which also fixes bus stops' longer ids getting cut off by a
+    // fixed-width text field.
+    elements.dkName.addEventListener("focus", () => elements.dkName.select());
+    elements.dkName.addEventListener("blur", () => setTimeout(handleDkStationLostFocus, 500));
+    elements.dkCallingStation.addEventListener("focus", () => elements.dkCallingStation.select());
+    elements.dkCallingStation.addEventListener("blur", () => setTimeout(handleDkCallingStationLostFocus, 500));
+    elements.clearDkCallingStation.addEventListener("click", handleClearDkCallingStation);
+    elements.letbaneName.addEventListener("focus", () => elements.letbaneName.select());
+    elements.letbaneName.addEventListener("blur", () => setTimeout(handleLetbaneStationLostFocus, 500));
+    elements.dkBusName.addEventListener("focus", () => elements.dkBusName.select());
+    elements.dkBusName.addEventListener("blur", () => setTimeout(handleDkBusStationLostFocus, 500));
+    elements.stogName.addEventListener("focus", () => elements.stogName.select());
+    elements.stogName.addEventListener("blur", () => setTimeout(handleStogStationLostFocus, 500));
 
     function getCurrentLocationConfig() {
         let config = {
@@ -1979,20 +2064,15 @@
       elements.busFilter.value = appState.busFilter;
 
       elements.dkName.value = appState.dkName;
-      elements.dkCrs.value = appState.dkCrs;
       elements.dkCallingStation.value = appState.dkCallingStation;
-      elements.dkCallingStopId.value = appState.dkCallingStopId;
       elements.form.querySelector('#dkProductIC').checked = !!(appState.dkProducts & 1);
       elements.form.querySelector('#dkProductICL').checked = !!(appState.dkProducts & 2);
       elements.form.querySelector('#dkProductRe').checked = !!(appState.dkProducts & 4);
       elements.form.querySelector('#dkProductTogbus').checked = !!(appState.dkProducts & 8);
       elements.form.querySelector('#dkProductStog').checked = !!(appState.dkProducts & 16);
       elements.letbaneName.value = appState.letbaneName;
-      elements.letbaneId.value = appState.letbaneId;
       elements.dkBusName.value = appState.dkBusName;
-      elements.dkBusId.value = appState.dkBusId;
       elements.stogName.value = appState.stogName;
-      elements.stogId.value = appState.stogId;
       elements.brightness.value = s.brightness ?? 50;
       const pct = (elements.brightness.value / 255) * 100;
       elements.brightness.title = Math.round(pct) + "%";
@@ -2053,6 +2133,72 @@
 
     function setCheckbox(id, value) {
       document.getElementById(id).checked = !!value;
+    }
+
+    function handleDkStationSelected(item) {
+      appState.dkStationSelected = true;
+      appState.dkName = item.name;
+      appState.dkCrs = item.id;
+      enableSave(true);
+    }
+
+    function handleDkStationLostFocus() {
+      if (!appState.dkStationSelected) elements.dkName.value = appState.dkName;
+      else appState.dkStationSelected = false;
+    }
+
+    function handleDkCallingStationSelected(item) {
+      appState.dkCallingStationSelected = true;
+      appState.dkCallingStation = item.name;
+      appState.dkCallingStopId = item.id;
+    }
+
+    function handleDkCallingStationLostFocus() {
+      if (!appState.dkCallingStationSelected) elements.dkCallingStation.value = appState.dkCallingStation;
+      else appState.dkCallingStationSelected = false;
+    }
+
+    function handleClearDkCallingStation() {
+      appState.dkCallingStopId = "";
+      appState.dkCallingStation = "";
+      appState.dkCallingStationSelected = false;
+      elements.dkCallingStation.value = appState.dkCallingStation;
+    }
+
+    function handleLetbaneStationSelected(item) {
+      appState.letbaneStationSelected = true;
+      appState.letbaneName = item.name;
+      appState.letbaneId = item.id;
+      enableSave(true);
+    }
+
+    function handleLetbaneStationLostFocus() {
+      if (!appState.letbaneStationSelected) elements.letbaneName.value = appState.letbaneName;
+      else appState.letbaneStationSelected = false;
+    }
+
+    function handleDkBusStationSelected(item) {
+      appState.dkBusStationSelected = true;
+      appState.dkBusName = item.name;
+      appState.dkBusId = item.id;
+      enableSave(true);
+    }
+
+    function handleDkBusStationLostFocus() {
+      if (!appState.dkBusStationSelected) elements.dkBusName.value = appState.dkBusName;
+      else appState.dkBusStationSelected = false;
+    }
+
+    function handleStogStationSelected(item) {
+      appState.stogStationSelected = true;
+      appState.stogName = item.name;
+      appState.stogId = item.id;
+      enableSave(true);
+    }
+
+    function handleStogStationLostFocus() {
+      if (!appState.stogStationSelected) elements.stogName.value = appState.stogName;
+      else appState.stogStationSelected = false;
     }
 
     function handleStationSelected(item) {

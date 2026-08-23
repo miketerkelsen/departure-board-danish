@@ -176,6 +176,27 @@ void rejseplanenClient::finaliseCallingStop() {
     numCallingStops++;
 }
 
+// Called when a stopLocationOrCoordLocation[]/StopLocation record's closing '}' is seen while
+// searching. Deliberately does NOT run the result through convertDanishToLatin1() - unlike every
+// other place that helper is used, this text is going into a JSON response for the browser (which
+// wants UTF-8, the encoding Rejseplanen already sent it in), not onto the board's own Latin-1-only
+// custom font.
+void rejseplanenClient::finaliseStopSearchResult() {
+    if (!stopSearchName[0] || !stopSearchExtId[0]) return;
+    if (stopSearchCount >= stopSearchMax) return;
+    if (stopSearchCount) stopSearchResult += ",";
+    stopSearchResult += "{\"name\":\"";
+    for (size_t i=0; stopSearchName[i]; i++) {
+        char c = stopSearchName[i];
+        if (c=='"' || c=='\\') stopSearchResult += '\\';
+        stopSearchResult += c;
+    }
+    stopSearchResult += "\",\"id\":\"";
+    stopSearchResult += stopSearchExtId;
+    stopSearchResult += "\"}";
+    stopSearchCount++;
+}
+
 void rejseplanenClient::whitespace(char c) {}
 
 void rejseplanenClient::startDocument() {
@@ -204,6 +225,11 @@ void rejseplanenClient::key(const char *k) {
 }
 
 void rejseplanenClient::value(const char *value) {
+    if (searchingStops) {
+        if (strcmp(currentPath,"stopLocationOrCoordLocation/StopLocation/name")==0) strlcpy(stopSearchName,value,sizeof(stopSearchName));
+        else if (strcmp(currentPath,"stopLocationOrCoordLocation/StopLocation/extId")==0) strlcpy(stopSearchExtId,value,sizeof(stopSearchExtId));
+        return;
+    }
     if (fetchingDepartures) {
         if (strcmp(currentPath,"Departure/name")==0) strlcpy(raw.name,value,sizeof(raw.name));
         else if (strcmp(currentPath,"Departure/direction")==0) strlcpy(raw.direction,value,sizeof(raw.direction));
@@ -229,7 +255,9 @@ void rejseplanenClient::startArray() {
     arrayDepth++;
     if (!inTargetArray) {
         bool isTarget;
-        if (fetchingDepartures) {
+        if (searchingStops) {
+            isTarget = (strcmp(pendingKey,"stopLocationOrCoordLocation")==0);
+        } else if (fetchingDepartures) {
             isTarget = (strcmp(pendingKey,"Departure")==0);
         } else {
             isTarget = (strcmp(pendingKey,"Stop")==0 && stackTop>0 && strcmp(pathStack[stackTop-1],"Stops")==0);
@@ -255,7 +283,8 @@ void rejseplanenClient::startObject() {
     bool isNewTargetElement = inTargetArray && stackTop == arrayBaseDepth;
 
     if (isNewTargetElement) {
-        if (fetchingDepartures) resetRawRecord();
+        if (searchingStops) { stopSearchName[0] = '\0'; stopSearchExtId[0] = '\0'; }
+        else if (fetchingDepartures) resetRawRecord();
         else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; }
     }
 
@@ -292,7 +321,8 @@ void rejseplanenClient::startObject() {
 void rejseplanenClient::endObject() {
     if (stackTop > 0) stackTop--;
     if (inTargetArray && stackTop == arrayBaseDepth) {
-        if (fetchingDepartures) finaliseDepartureRecord();
+        if (searchingStops) finaliseStopSearchResult();
+        else if (fetchingDepartures) finaliseDepartureRecord();
         else finaliseCallingStop();
     }
 }
@@ -576,4 +606,94 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         strlcpy(station->origin, xStation->service[0].origin, sizeof(station->origin));
         strlcpy(station->serviceMessage, xStation->service[0].serviceMessage, sizeof(station->serviceMessage));
     }
+}
+
+//
+// Searches Rejseplanen stops by name - called synchronously from the web server's own request
+// handler (handleDkStationPicker() in "Departures Board.cpp"), same pattern as the National Rail
+// station picker proxy, just with real JSON parsing here (rather than a raw passthrough) since a
+// location.name response embeds each stop's full product list and can run to several KB per match -
+// far more than a name+id typeahead needs to carry over WiFi to the browser.
+//
+String rejseplanenClient::searchStops(const char *query, const char *accessId, int maxResults) {
+    stopSearchResult = "[";
+    stopSearchCount = 0;
+    stopSearchMax = maxResults;
+    stopSearchName[0] = '\0';
+    stopSearchExtId[0] = '\0';
+
+    WiFiClientSecure httpsClient;
+    httpsClient.setInsecure();
+    httpsClient.setTimeout(6000);
+    httpsClient.setConnectionTimeout(6000);
+    httpsClient.setNoDelay(false);
+
+    int retryCounter = 0;
+    while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 5)) {
+        delay(100);
+        retryCounter++;
+    }
+    if (retryCounter>=5) return "[]";
+
+    // URL-encode the query (Danish letters, spaces, etc.)
+    String encodedQuery;
+    for (size_t i=0; i<strlen(query); ++i) {
+        unsigned char ch = (unsigned char)query[i];
+        if (isalnum(ch)) encodedQuery += (char)ch;
+        else {
+            char buf[4];
+            sprintf(buf,"%%%02X",ch);
+            encodedQuery += buf;
+        }
+    }
+
+    String request = String("GET ") + rjLocationNameApi + "?accessId=" + String(accessId) + "&format=json&input=" + encodedQuery + " HTTP/1.0\r\nHost: " + String(rjHost) + "\r\nConnection: close\r\n\r\n";
+    httpsClient.print(request);
+
+    retryCounter = 0;
+    while (!httpsClient.available()) {
+        delay(100);
+        retryCounter++;
+        if (retryCounter>=60) { httpsClient.stop(); return "[]"; }
+    }
+
+    String statusLine = httpsClient.readStringUntil('\n');
+    if (!statusLine.startsWith("HTTP/") || statusLine.indexOf("200 OK") == -1) {
+        httpsClient.stop();
+        return "[]";
+    }
+    unsigned long headerTimeout = millis() + 1000UL;
+    while ((httpsClient.available() || httpsClient.connected()) && millis() < headerTimeout) {
+        String line = httpsClient.readStringUntil('\n');
+        if (line == "\r") break;
+    }
+
+    JsonStreamingParserGS parser;
+    parser.setListener(this);
+    parser.reset();
+    searchingStops = true;
+    fetchingDepartures = false;
+    stackTop = 0;
+    pendingKey[0] = '\0';
+    currentPath[0] = '\0';
+    targetElementKey[0] = '\0';
+    inTargetArray = false;
+    arrayDepth = 0;
+    arrayBaseDepth = -1;
+    targetArrayDepth = -1;
+
+    char c;
+    unsigned long dataTimeout = millis() + 8000UL;
+    while ((httpsClient.available() || httpsClient.connected()) && millis() < dataTimeout && stopSearchCount < stopSearchMax) {
+        while (httpsClient.available() && stopSearchCount < stopSearchMax) {
+            c = httpsClient.read();
+            parser.parse(c);
+        }
+        delay(2);
+    }
+    httpsClient.stop();
+    searchingStops = false;
+
+    stopSearchResult += "]";
+    return stopSearchResult;
 }

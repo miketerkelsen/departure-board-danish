@@ -65,6 +65,7 @@ class rejseplanenClient: public JsonListenerGS {
         const char* rjHost = "www.rejseplanen.dk";
         const char* rjDepartureBoardApi = "/api/departureBoard";
         const char* rjJourneyDetailApi = "/api/journeyDetail";
+        const char* rjLocationNameApi = "/api/location.name";
 
         rdiStation* xStation = nullptr;
         stnMessages* xMessages = nullptr;
@@ -89,8 +90,20 @@ class rejseplanenClient: public JsonListenerGS {
         char targetElementKey[MAXKEYNAMESIZE];
 
         bool fetchingDepartures;       // true = parsing departureBoard, false = parsing journeyDetail
+        bool searchingStops = false;   // true = parsing location.name (stop-name search), see searchStops()
         bool inTargetArray = false;    // inside the "Departure" (or "Stops/Stop") array
         int arrayDepth = 0;
+
+        // location.name (stop-name search) state - a location.name response nests a "name" field at
+        // several levels (each StopLocation's own name, but also every one of its productAtStop
+        // entries), so - same as everywhere else in this file - only an exact full-path match
+        // ("stopLocationOrCoordLocation/StopLocation/name") is trusted, never a bare key() check.
+        char stopSearchName[MAXLOCATIONSIZE];
+        char stopSearchExtId[16];
+        String stopSearchResult;
+        int stopSearchCount = 0;
+        int stopSearchMax = 8;
+        void finaliseStopSearchResult();
 
         rjRawRecord raw;
         int arrayBaseDepth = -1;       // stackTop depth of the target array's elements
@@ -122,4 +135,8 @@ class rejseplanenClient: public JsonListenerGS {
         rejseplanenClient(rdiStation *station, stnMessages *messages, sharedBufferSpace *sharedBuffer);
         int fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins);
         void loadDepartures(rdStation *station, stnMessages *messages);
+        // Searches Rejseplanen stops by (partial) name - powers the web config's name-search typeahead
+        // for every DK mode, in place of making the user look up/type a numeric stop id by hand.
+        // Returns a compact JSON array "[{"name":"...","id":"..."},...]", capped at maxResults.
+        String searchStops(const char *query, const char *accessId, int maxResults = 8);
 };

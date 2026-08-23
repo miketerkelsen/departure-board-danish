@@ -3363,6 +3363,29 @@ void handleStationPicker(AsyncWebServerRequest *request)
   request->send(response);
 }
 
+// Call Rejseplanen's own stop-name search (called from index.htm's DK Tog/Letbane/DK Bus/S-tog
+// name-search typeaheads) - unlike handleStationPicker() above, this doesn't pass the upstream
+// response straight through: a location.name response embeds every matching stop's full product
+// list (IC/Re/S-tog lines etc., several KB per match), so rejseplanenClient::searchStops() parses
+// it server-side and returns just the compact name+id pairs the typeahead actually needs.
+void handleDkStationPicker(AsyncWebServerRequest *request) {
+  if (!request->hasParam("q")) {
+    sendResponse(400,"Missing Query",request);
+    return;
+  }
+  String query = request->getParam("q")->value();
+  if (query.length() <= 1) {
+    sendResponse(400,"Query too short",request);
+    return;
+  }
+  if (!rejseplanenKey[0]) {
+    sendResponse(400,"No Rejseplanen API key configured",request);
+    return;
+  }
+  String result = rejseplanenData.searchStops(query.c_str(), rejseplanenKey, 8);
+  request->send(200,"application/json",result);
+}
+
 /*
  * Setup / Loop functions
 */
@@ -4328,6 +4351,7 @@ void setup(void) {
   server.on("/del", HTTP_GET, [](AsyncWebServerRequest *request){handleDelete(request);});
   server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request){handleReboot(request);});
   server.on("/stationpicker", HTTP_GET, [](AsyncWebServerRequest *request){handleStationPicker(request);});
+  server.on("/dkstationpicker", HTTP_GET, [](AsyncWebServerRequest *request){handleDkStationPicker(request);});
   server.on("/firmware", HTTP_GET, [](AsyncWebServerRequest *request){handleFirmwareInfo(request);});
   server.on("/brightness", HTTP_GET, [](AsyncWebServerRequest *request){handleBrightness(request);});
   server.on("/ota", HTTP_GET, [](AsyncWebServerRequest *request){handleOtaUpdate(request);});
