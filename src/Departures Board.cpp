@@ -377,7 +377,7 @@ static bool softResetNeeded = false;       // Is a soft reset pending?
 static bool manualUpdateCheck = false;     // Has the GUI requested a firmware update check
 static bool showDataIcon = false;          // Show the data transfer indicator?
 static bool updateIconVisible = false;     // Is the data update icon visible?
-static bool dateEnabled = false;           // Showing the date on screen?
+static bool dateEnabled = true;            // Showing the date on screen?
 static bool weatherEnabled = false;        // Showing weather at station location. Requires an OpenWeatherMap API key.
 static bool enableBus = false;             // Include Bus services on the board?
 static bool firmwareUpdates = true;        // Check for and install firmware updates automatically at boot?
@@ -625,8 +625,13 @@ int getStringWidth(const char *message) {
 // same-height stock U8g2 "_tf" font (which does have full Latin-1 coverage) for that one
 // character, switching straight back afterwards. Text with no accented characters (i.e. all UK
 // content) draws identically to plain drawStr()/getStrWidth() - this is a no-op passthrough.
+//
+// Also covers Swedish ä/Ä/ö/Ö (Latin-1 0xE4/0xC4/0xF6/0xD6) - some Swedish trains (SJ/Snälltåg)
+// run through Danish stations, so their names/destinations can carry these too. å/Å are already
+// covered above (shared with Danish); ä/ö are the two genuinely Swedish-only ones.
 static bool isDanishAccentByte(unsigned char c) {
-  return c==0xE6 || c==0xF8 || c==0xE5 || c==0xC6 || c==0xD8 || c==0xC5; // æ ø å Æ Ø Å
+  return c==0xE6 || c==0xF8 || c==0xE5 || c==0xC6 || c==0xD8 || c==0xC5    // æ ø å Æ Ø Å
+      || c==0xE4 || c==0xC4 || c==0xF6 || c==0xD6;                        // ä Ä ö Ö
 }
 
 // Rejseplanen API text (destination/via/stopArea/calling-point names) already arrives converted to
@@ -1552,7 +1557,7 @@ void saveFirmwareInfo() {
 
 // Write a default config file so that the Web GUI works initially (force Tube mode if no NR token)
 void writeDefaultConfig() {
-  String defaultConfig = "{\"crs\":\"\",\"station\":\"\",\"lat\":0,\"lon\":0,\"weather\":true,\"sleep\":false,\"showDate\":false,\"showBus\":false,\"update\":true,\"sleepStarts\":23,\"sleepEnds\":8,\"brightness\":20,\"tubeId\":\"\",\"tubeName\":\"\",\"mode\":" + String((!nrToken[0] && rdmDeparturesApiKey=="")?"1":"0") + "}";
+  String defaultConfig = "{\"crs\":\"\",\"station\":\"\",\"lat\":0,\"lon\":0,\"weather\":true,\"sleep\":false,\"showDate\":true,\"showBus\":false,\"update\":true,\"sleepStarts\":23,\"sleepEnds\":8,\"brightness\":20,\"tubeId\":\"\",\"tubeName\":\"\",\"mode\":" + String((!nrToken[0] && rdmDeparturesApiKey=="")?"1":"0") + "}";
   saveFile("/config.json",defaultConfig);
   resetLocationIds();
   saveFirmwareInfo();
