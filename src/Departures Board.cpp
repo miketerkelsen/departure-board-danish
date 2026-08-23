@@ -2254,17 +2254,25 @@ bool useSTogStyle(int idx) {
 }
 
 // Rejseplanen has no seconds-resolution "time to arrival" field (unlike TfL), so approximate a
-// minute countdown from the service's (possibly realtime) HH:MM against the board's own current
-// time - the same approach already used for the Letbane board (see drawUndergroundService()).
-// Floors at 0 (never negative); callers floor the *displayed* value at 1 separately.
-int sTogCountdownMinutes(const rdService &svc) {
+// countdown from the service's (possibly realtime) HH:MM against the board's own current time -
+// down to the second (timeinfo.tm_sec), not just the minute, so the display isn't stuck jumping
+// straight from "due" to a whole "1 min" with nothing in between. Writes the formatted countdown
+// text ("Nu"/"1/2 min"/"1 min"/"2 min"/...) into out.
+void sTogCountdownText(const rdService &svc, char *out, size_t outSize) {
   const char *timeStr = isDigit(svc.etd[0]) ? svc.etd : svc.sTime;
   int h=0,m=0;
   sscanf(timeStr,"%d:%d",&h,&m);
-  int delta = (h*60+m) - getTimeInMinutes();
-  if (delta < -60) delta += 1440;      // rolled over past midnight
-  else if (delta < 0) delta = 0;       // small negative from clock drift/refresh lag - treat as due now
-  return delta;
+  long deltaSec = (long)(h*3600+m*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+  if (deltaSec < -3600*12) deltaSec += 86400;  // rolled over past midnight
+  else if (deltaSec < 0) deltaSec = 0;         // small negative from clock drift/refresh lag - treat as due now
+  if (deltaSec < 15) {
+    strlcpy(out,"Nu",outSize);                 // due (Danish "now")
+  } else if (deltaSec < 45) {
+    strlcpy(out,"1/2 min",outSize);            // ~30s away - too soon for "1 min" to read right
+  } else {
+    int mins = (int)((deltaSec + 30) / 60);    // round to nearest whole minute, same as the Letbane board
+    snprintf(out,outSize,"%d min",mins);
+  }
 }
 
 // Draws the S-tog line-letter badge: a small filled rounded square with the line letter "punched
@@ -2295,7 +2303,13 @@ static bool getGlyphBox(u8g2_t *u, uint16_t encoding, int8_t *outW, int8_t *outH
 
 void drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
   const uint8_t *prevFont = u8g2.getU8g2()->font;
-  u8g2.drawRBox(x,y,size,size,2);
+  // u8g2's box/corner drawing is strictly 1-bit here - drawRBox()'s corners come from drawDisc(),
+  // which (like every u8g2 primitive) writes each pixel fully on or fully off, never partial/dimmed
+  // - so "dim" pixels can't come from the fill itself. At r=2 on a badge this small (9-12px), the
+  // quarter-circle notch cut from each corner is a large enough fraction of the square that it can
+  // read as gaps in the fill rather than rounding. r=1 keeps a visibly rounded (not sharp-square)
+  // corner while leaving the fill itself looking solid.
+  u8g2.drawRBox(x,y,size,size,1);
   u8g2.setFont(font);
   u8g2_t *u = u8g2.getU8g2();
   // u8g2's own PosTop mode adds font_ref_ascent+1 (not just font_ref_ascent) before handing y off to
@@ -2362,8 +2376,7 @@ void drawPrimaryService(bool showVia) {
     destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
   }
   if (sTogStyle && !station.service[0].isCancelled) {
-    int mins = sTogCountdownMinutes(station.service[0]);
-    sprintf(etd,"%d min",mins<1?1:mins);
+    sTogCountdownText(station.service[0],etd,sizeof(etd));
   } else if (isDigit(station.service[0].etd[0])) sprintf(etd,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Forventet %s":"Exp %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
   int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
@@ -2450,8 +2463,7 @@ void drawServiceLine(int line, int y) {
     }
     char etd[16];
     if (sTogStyle && !station.service[line].isCancelled) {
-      int mins = sTogCountdownMinutes(station.service[line]);
-      sprintf(etd,"%d min",mins<1?1:mins);
+      sTogCountdownText(station.service[line],etd,sizeof(etd));
     } else if (isDigit(station.service[line].etd[0])) sprintf(etd,(boardMode==MODE_DKRAIL||boardMode==MODE_STOG)?"Forventet %s":"Exp %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
     int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
