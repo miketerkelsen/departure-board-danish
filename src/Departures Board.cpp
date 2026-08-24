@@ -1964,20 +1964,26 @@ bool checkForFirmwareUpdate() {
 // bugs of its own. Three identical rounded cars, uniformly rounded on all four corners (no
 // per-corner logic to get wrong), then a plain triangular nose. Tune carW/carH/gap/noseLen/r here.
 void drawTrainIcon(int x, int y) {
-  const int carW=9, carH=8, gap=1, noseLen=5;
+  const int carW=9, carH=8, gap=1;
   int cx = x;
-  // Three plain sharp-cornered rectangles, 1px gap between each.
+  // Three plain sharp-cornered rectangles, 1px gap between each - the joints between cars stay sharp.
   for (int i=0;i<3;i++) {
     u8g2.drawBox(cx,y,carW,carH);
     cx += carW+gap;
   }
+  // Round the rear corners of car 1 (top-left, bottom-left) by nicking a single pixel off each.
+  u8g2.setDrawColor(0);
+  u8g2.drawPixel(x,y);
+  u8g2.drawPixel(x,y+carH-1);
+  u8g2.setDrawColor(1);
   cx -= gap; // the nose sits flush against the front rectangle, no gap before it
-  // Built one column at a time rather than drawTriangle() - on real hardware that left the bottom
-  // row 1px short of the rectangles' own bottom edge, so the point never actually sat flush. Each
-  // column here is its own bottom-anchored vertical line, which guarantees every one of them,
-  // including the last, reaches exactly the same bottom row as the three rectangles.
-  for (int i=0;i<noseLen;i++) {
-    int h = carH - (i*(carH-1))/(noseLen-1);
+  // Nose: bottom-anchored taper, one column at a time (drawTriangle() left the bottom row 1px short
+  // of the rectangles' own bottom edge on real hardware, so the point never sat flush). The front-top
+  // corner is softened by starting the taper at 7px instead of a flush 8px, and the front-bottom is
+  // blunted by ending at a 2px-tall edge instead of a single sharp pixel.
+  const int noseHeights[] = {7,6,4,2};
+  for (int i=0;i<4;i++) {
+    int h = noseHeights[i];
     u8g2.drawVLine(cx+i,y+carH-h,h);
   }
 }
