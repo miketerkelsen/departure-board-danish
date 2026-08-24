@@ -51,7 +51,6 @@
 #include <webgui/keys.h>
 #include <webgui/editrss.h>
 #include <webgui/rss.h>
-#include <gfx/xbmgfx.h>
 #include <time.h>
 
 #include <SPI.h>
@@ -897,13 +896,13 @@ void progressBar(const char *text, int percent) {
 
 void drawFirmware() {
   char firmware[16];
-  sprintf(firmware,"B%d.%d-W%d.%d",VERSION_MAJOR,VERSION_MINOR,WEBAPPVER_MAJOR,WEBAPPVER_MINOR);
+  sprintf(firmware,"v%d.%d",VERSION_MAJOR,VERSION_MINOR);
    u8g2.drawStr(0,53,firmware);
 }
 
 void drawStartupHeading() {
   u8g2.setFont(NatRailTall12);
-  centreText("Departures Board",0);
+  centreText("Danske afgangstavler",0);
   u8g2.setFont(NatRailSmall9);
   drawFirmware();
 }
@@ -1322,9 +1321,8 @@ String getBuildTime() {
 
 void checkPostWebUpgrade() {
   JsonDocument doc;
-  char prevFirmware[15] = "B0.0-W0.0";
-  char prevGUI[8];
-  char currentGUI[8];
+  char prevFirmware[15] = "0.0";
+  char currentFirmware[8];
 
   if (LittleFS.exists("/fw.json")) {
     File file = LittleFS.open("/fw.json", "r");
@@ -1342,10 +1340,10 @@ void checkPostWebUpgrade() {
   }
 
   if (prevFirmware[0]) {
-    sscanf(prevFirmware,"%*[^ -]-%s",prevGUI);
-    sprintf(currentGUI,"W%d.%d",WEBAPPVER_MAJOR,WEBAPPVER_MINOR);
-    if (strcmp(prevGUI,currentGUI)) {
-      // clean up old/dev files
+    sprintf(currentFirmware,"%d.%d",VERSION_MAJOR,VERSION_MINOR);
+    if (strcmp(prevFirmware,currentFirmware)) {
+      // clean up old/dev files - still relevant for any board upgrading from a pre-2.0 release that
+      // stored its web UI as loose files rather than embedded in the firmware image
       progressBar("Rydder op efter opgradering",45);
       LittleFS.remove("/index_d.htm");
       LittleFS.remove("/index.htm");
@@ -1426,7 +1424,7 @@ void resetLocationIds() {
 }
 
 void saveFirmwareInfo() {
-  String fw = "{\"fw\":\"B" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + "-W" + String(WEBAPPVER_MAJOR) + "." + String(WEBAPPVER_MINOR) + "\"}";
+  String fw = "{\"fw\":\"" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + "\"}";
   saveFile("/fw.json",fw);
 }
 
@@ -1875,8 +1873,9 @@ void wmConfigModeCallback (WiFiManager *myWiFiManager) {
  * Firmware / Web GUI Update functions
 */
 bool isFirmwareUpdateAvailable() {
-  int releaseMajor = ghUpdate.releaseId.substring(1,ghUpdate.releaseId.indexOf(".")).toInt();
-  int releaseMinor = ghUpdate.releaseId.substring(ghUpdate.releaseId.indexOf(".")+1,ghUpdate.releaseId.indexOf("-")).toInt();
+  int dotPos = ghUpdate.releaseId.indexOf(".");
+  int releaseMajor = ghUpdate.releaseId.substring(0,dotPos).toInt();
+  int releaseMinor = ghUpdate.releaseId.substring(dotPos+1).toInt();
   if (VERSION_MAJOR > releaseMajor) return false;
   if ((VERSION_MAJOR == releaseMajor) && (VERSION_MINOR >= releaseMinor)) return false;
   return true;
@@ -2890,7 +2889,7 @@ void handleRoot(AsyncWebServerRequest *request) {
 
 // Send the firmware version to the client (called from index.htm)
 void handleFirmwareInfo(AsyncWebServerRequest *request) {
-  String response = "{\"firmware\":\"B" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + "-W" + String(WEBAPPVER_MAJOR) + "." + String(WEBAPPVER_MINOR) + "\"}";
+  String response = "{\"firmware\":\"" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + "\"}";
   request->send(200,contentTypeJson,response);
 }
 
@@ -3931,8 +3930,6 @@ void setup(void) {
   u8g2.setFontRefHeightAll();         // Count entire font height
   u8g2.setFontPosTop();               // Reference from top
   u8g2.setFont(NatRailTall12);
-  String buildDate = String(__DATE__);
-  String notice = "\x80 " + buildDate.substring(buildDate.length()-4) + " Gadec Software (github.com/gadec-uk)";
 
   bool isFSMounted = LittleFS.begin(true);    // Start the File System, format if necessary
   strcpy(station.location,"");                // No default location
@@ -3941,12 +3938,6 @@ void setup(void) {
   loadConfig(true);                           // Load the configuration settings from config.json
   u8g2.setContrast(brightness);               // Set the panel brightness to the user saved level
   if (flipScreen) u8g2.setFlipMode(1);
-  u8g2.clearBuffer();
-  u8g2.drawXBM(81,0,gadeclogo_width,gadeclogo_height,gadeclogo_bits);
-  centreText(notice.c_str(),48);
-  u8g2.sendBuffer();
-  delay(5000);
-
   u8g2.clearBuffer();
   drawStartupHeading();
   u8g2.sendBuffer();

@@ -1,8 +1,6 @@
 # departures-board [![License Badge](https://img.shields.io/badge/BY--NC--SA%204.0%20License-grey?style=flat&logo=creativecommons&logoColor=white)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
 
-This is an ESP32 based Departures Board replicating those at many UK railway stations (using data provided by National Rail's public API), London Underground Arrivals boards (using data provided by TfL), UK wide bus stops (using data provided by bustimes.org) and Danish trains/letbane (using data provided by Rejseplanen). This implementation uses a 3.12" OLED display panel with SSD1322 display controller onboard, plus an optional TTP223 touch sensor. STL files are also provided for 3D printing the custom desktop case. Pre-assembled departure boards are also available exclusively from our [store](https://store.gadec.co.uk).
-
-A model railway (00 gauge) version of this project is also available [here](https://github.com/gadec-uk/tiny-departures-board).
+This is an ESP32 based Departures Board replicating those at many UK railway stations (using data provided by National Rail's public API), London Underground Arrivals boards (using data provided by TfL), UK wide bus stops (using data provided by bustimes.org) and Danish trains/letbane (using data provided by Rejseplanen). This implementation uses a 3.12" OLED display panel with SSD1322 display controller onboard, plus an optional TTP223 touch sensor. STL files are also provided for 3D printing the custom desktop case.
 
 ## Features
 * All processing is done onboard by the ESP32 processor, no middleware servers
@@ -37,7 +35,7 @@ A model railway (00 gauge) version of this project is also available [here](http
 
 1. An ESP32 D1 Mini board (or clone) - either USB-C or Micro-USB version with CH9102 recommended. For example, from [AliExpress](https://www.aliexpress.com/item/1005005972627549.html).
 2. A 3.12" 256x64 OLED Display Panel with SSD1322 display controller onboard. For example, from [AliExpress](https://www.aliexpress.com/item/1005008558326731.html).
-3. A 3D printed case using the [STL](https://github.com/gadec-uk/departures-board/tree/main/stl) files provided. If you don't have a 3D printer, you can use a 3D print service, local library or group.
+3. A 3D printed case using the STL files provided (see Credits below for where the original case design comes from). If you don't have a 3D printer, you can use a 3D print service, local library or group.
 4. Optionally, a TTP223 touch sensor (for easily switching modes / stations). For example, from [AliExpress](https://www.aliexpress.com/item/1005007850732859.html). If fitted, the touch sensor should be glued to the inside of one of the walls of the top part of the case with the *sensor* side against the case.
 5. For National Rail, the board supports using either the Rail Delivery Group feeds (recommended) or the legacy OpenLDBWS feed. Both feeds are free of charge and provide identical information but the legacy OpenLDBWS feed may be discontinued in the future. To use the Rail Delivery Group feeds, you will need a [Live Departure Board 1.1](https://raildata.org.uk/dataProduct/P-d81d6eaf-8060-4467-a339-1c833e50cbbe/overview) consumer key and (optionally) a [Service Details 1.1](https://raildata.org.uk/dataProduct/P-4dec1247-d040-4290-80a4-639dfac54a92/overview) consumer key. Alternatively, if you prefer to use the legacy OpenLDBWS feed, you can register for a token [here](https://realtime.nationalrail.co.uk/OpenLDBWSRegistration).
 6. By default, weather data is sourced from Open-Meteo. If you prefer to use OpenWeather (which usually provides slightly more localised weather conditions) you will need an OpenWeather Map API token (these are also free, sign-up for a free developer account [here](https://home.openweathermap.org/users/sign_up)).
@@ -79,7 +77,7 @@ The project uses the Arduino framework and the ESP32 v3.3.9 core. If you want to
 
 The easiest way to install the firmware for the first time is to use the online web based installer [here](https://departures-board.github.io). You will need to use Chrome, Edge or Firefox as your browser as Safari does not support Web Serial.
 
-Alternatively, you can download pre-compiled firmware images from the [releases](https://github.com/gadec-uk/departures-board/releases). These can be installed over the USB serial connection using [esptool](https://github.com/espressif/esptool). If you have python installed, install with *pip install esptool*. For convenience, a pre-compiled executable version for Windows is included [here](https://github.com/gadec-uk/departures-board/tree/main/esptool).
+Alternatively, you can download pre-compiled firmware images from the [releases](https://github.com/miketerkelsen/departure-board-danish/releases). These can be installed over the USB serial connection using [esptool](https://github.com/espressif/esptool). If you have python installed, install with *pip install esptool*. For convenience, a pre-compiled executable version for Windows is included [here](https://github.com/miketerkelsen/departure-board-danish/tree/main/esptool).
 
 If the board is not recognised you are probably using a version with the CP2104 USB-to-Serial chip. Drivers for the CP2104 are [here](https://www.silabs.com/developer-tools/usb-to-uart-bridge-vcp-drivers?tab=downloads)
 
@@ -173,7 +171,7 @@ A drop-down menu (top-right) adds the following options:
 
 A few other urls have been implemented, primarily for debugging/developer use:
 - **/factoryreset** - deletes all configuration information, api keys and WiFi credentials. The entire setup process will need to be repeated.
-- **/update** - for manual firmware updates. Download the latest binary from the [releases](https://github.com/gadec-uk/departures-board/releases). Only the **firmware.bin** file should be uploaded via */update*. The other .bin files are not used for upgrades. This method is *not* recommended for normal use.
+- **/update** - for manual firmware updates. Download the latest binary from the [releases](https://github.com/miketerkelsen/departure-board-danish/releases). Only the **firmware.bin** file should be uploaded via */update*. The other .bin files are not used for upgrades. This method is *not* recommended for normal use.
 - **/info** - displays some basic information about the current running state.
 - **/formatffs** - formats the filing system, erasing the configuration files (but not the WiFi credentials).
 - **/dir** - displays a (basic) directory listing of the file system with the ability to view/delete files.
@@ -193,10 +191,8 @@ DK Tog mode mirrors the National Rail layout (with Danish text and "calling at"/
 ### Custom Time Zones
 To set a custom time zone for the departure board clock, you will need to enter the POSIX time zone string for your location. Some examples are `CST6CDT,M3.2.0/2,M11.1.0/2` for Canada (Central Time), `AEST-10AEDT,M10.1.0,M4.1.0/3` for Australia (Eastern Time) and `CET-1CEST,M3.5.0,M10.5.0/3` for Denmark (Central European Time). The easiest way to find the correct syntax is to ask your favourite AI chat engine *"What is the POSIX time zone string for ..."*. Note that changing the time zone only affects the clock (and date) display. National Rail/TfL/Bus service times are *always* shown in UK time; DK Tog/Letbane service times are always shown in Danish local time (both come pre-localised from their respective APIs, regardless of the board's own clock time zone).
 
-### Donating
-
-<a href="https://buymeacoffee.com/gadec.uk"><img src="https://github.com/user-attachments/assets/e5960046-051a-45af-8730-e23d4725ab53" align="left" width="160" style="margin-right: 15px;" /></a>
-This software is completely free for non-commercial use without obligation. If you would like to support me and encourage ongoing updates, you can [buy me a coffee!](https://buymeacoffee.com/gadec.uk)
+### Credits
+This project is a Danish-focused fork of the original [Departures Board](https://github.com/gadec-uk/departures-board) by Gadec Software, including the OLED case design. This fork replaces the UK Rail/Tube/Bus modes with Danish Rejseplanen-based modes (Tog, S-tog, Letbane, Bus) and translates the on-screen display to Danish.
 
 ### Licence
 This work is licensed under **Creative Commons Attribution-NonCommercial-ShareAlike 4.0**. To view a copy of this licence, visit [https://creativecommons.org/licenses/by-nc-sa/4.0/](https://creativecommons.org/licenses/by-nc-sa/4.0/). Note: the terms of the licence prohibit commericial use of this work, this includes *any* reselling of the work in kit or assembled form for commercial gain.

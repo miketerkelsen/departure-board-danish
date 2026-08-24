@@ -1614,13 +1614,8 @@
         }
 
         const parseVersion = (str) => {
-          const match = str.match(/B(\d+)\.(\d+)-W(\d+)\.(\d+)/);
-          return match
-            ? {
-              B: { major: Number(match[1]), minor: Number(match[2]) },
-              W: { major: Number(match[3]), minor: Number(match[4]) }
-            }
-            : null;
+          const match = str.match(/(\d+)\.(\d+)/);
+          return match ? { major: Number(match[1]), minor: Number(match[2]) } : null;
         };
 
         const isNewer = (latest, current) => {
@@ -1638,7 +1633,7 @@
           return;
         }
 
-        if (isNewer(latest.B, current.B) || isNewer(latest.W, current.W)) {
+        if (isNewer(latest, current)) {
           if (await bsConfirm(`An update to version ${latestTag} is available.\n\nClick <b>OK</b> to install the update now or <b>Cancel</b> to abort.\n\n<b>Release Notes:</b>\n${latestRelNotes}\n\n`)) {
             fetch('/ota', { method: 'GET' })
               .then(res => res.text())
