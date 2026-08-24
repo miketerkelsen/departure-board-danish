@@ -1823,7 +1823,7 @@ void softResetBoard(boardModes requestedMode) {
   switch (boardMode) {
     case MODE_DKRAIL:
       checkWeatherUpdate(prevLat,prevLon);
-      progressBar("Initialiserer Rejseplanen",70);
+      progressBar("Initialiserer Tog",70);
       break;
 
     case MODE_LETBANE:
@@ -4254,7 +4254,7 @@ void setup(void) {
   );
 
   if (boardMode == MODE_DKRAIL) {
-      progressBar("Initialiserer Rejseplanen",70);
+      progressBar("Initialiserer Tog",70);
       startupProgressPercent=70;
   } else if (boardMode == MODE_LETBANE) {
       progressBar("Initialiserer Letbane",70);
