@@ -2040,12 +2040,16 @@ void sTogCountdownText(const rdService &svc, char *out, size_t outSize) {
   }
 }
 
-// Draws the S-tog line-letter badge: a small filled rounded square with the line letter "punched
-// out" in the background colour (e.g. a solid square with a black "A" knocked out of the white
-// fill), matching the roundel look of Copenhagen's real S-tog line signage. size is both the width
-// and height, kept square as asked - two-letter lines (e.g. "Bx") just sit a little snugger inside
-// the same square rather than widening it. Saves/restores whatever font was active on entry, so it
-// can be called safely from mid-draw in either drawPrimaryService() or drawServiceLine().
+// Draws the S-tog line-letter badge: a small filled rounded box with the line letter "punched out"
+// in the background colour (e.g. a solid square with a black "A" knocked out of the white fill),
+// matching the roundel look of Copenhagen's real S-tog line signage. size is the height, and also
+// the width for ordinary single-letter lines (A, B, C, E, F, H), which stay perfectly square. A
+// label whose ink genuinely doesn't fit that square - currently only the Bx line - widens the badge
+// into a small rounded rectangle instead, matching how Copenhagen's own signage shows Bx as a wider
+// pill rather than squeezing two letters into the same square as the single-letter lines. Returns
+// the badge's actual drawn width, since callers can no longer assume it's always `size`. Saves/
+// restores whatever font was active on entry, so it can be called safely from mid-draw in either
+// drawPrimaryService() or drawServiceLine().
 // Reads one glyph's tight ink box (width, height, x/y-offset) straight from the currently active
 // font's raw data - same low-level decode as getGlyphYOffset() above, extended to also capture
 // width and x-offset. u8g2's own u8g2_GetGlyphWidth()/getStrWidth() only return the ADVANCE width
@@ -2066,15 +2070,8 @@ static bool getGlyphBox(u8g2_t *u, uint16_t encoding, int8_t *outW, int8_t *outH
   return true;
 }
 
-void drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
+int drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
   const uint8_t *prevFont = u8g2.getU8g2()->font;
-  // u8g2's box/corner drawing is strictly 1-bit here - drawRBox()'s corners come from drawDisc(),
-  // which (like every u8g2 primitive) writes each pixel fully on or fully off, never partial/dimmed
-  // - so "dim" pixels can't come from the fill itself. At r=2 on a badge this small (9-12px), the
-  // quarter-circle notch cut from each corner is a large enough fraction of the square that it can
-  // read as gaps in the fill rather than rounding. r=1 keeps a visibly rounded (not sharp-square)
-  // corner while leaving the fill itself looking solid.
-  u8g2.drawRBox(x,y,size,size,1);
   u8g2.setFont(font);
   u8g2_t *u = u8g2.getU8g2();
   // u8g2's own PosTop mode adds font_ref_ascent+1 (not just font_ref_ascent) before handing y off to
@@ -2110,12 +2107,28 @@ void drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *fo
     cursorX += u8g2_GetGlyphWidth(u,c);
   }
 
-  int tx = any ? x + (size-(inkRight-inkLeft))/2 - inkLeft : x;
+  // Widen past the square only if the ink actually needs it, so every existing single-letter badge
+  // (which already fits comfortably) is completely unaffected - this only ever grows the box.
+  const int hPad = 2;
+  int inkWidth = any ? inkRight-inkLeft : 0;
+  int width = size;
+  if (inkWidth+hPad*2 > width) width = inkWidth+hPad*2;
+
+  // u8g2's box/corner drawing is strictly 1-bit here - drawRBox()'s corners come from drawDisc(),
+  // which (like every u8g2 primitive) writes each pixel fully on or fully off, never partial/dimmed
+  // - so "dim" pixels can't come from the fill itself. At r=2 on a badge this small (9-12px), the
+  // quarter-circle notch cut from each corner is a large enough fraction of the square that it can
+  // read as gaps in the fill rather than rounding. r=1 keeps a visibly rounded (not sharp-square)
+  // corner while leaving the fill itself looking solid.
+  u8g2.drawRBox(x,y,width,size,1);
+
+  int tx = any ? x + (width-inkWidth)/2 - inkLeft : x;
   int ty = any ? y + (size-(inkBottom-inkTop))/2 - inkTop : y;
   u8g2.setDrawColor(0);
   u8g2.drawStr(tx,ty,letter);
   u8g2.setDrawColor(1);
   u8g2.setFont(prevFont);
+  return width;
 }
 
 // Draw the primary service line
@@ -2135,8 +2148,8 @@ void drawPrimaryService(bool showVia) {
   blankArea(0,LINE1-2,256,LINE2-LINE1+2);
   bool sTogStyle = useSTogStyle(0);
   if (sTogStyle) {
-    drawSTogBadge(0,LINE1-1,12,station.service[0].via[0]?station.service[0].via:"?",u8g2_font_6x13B_tf);
-    destPos = 12+4;
+    int badgeW = drawSTogBadge(0,LINE1-1,12,station.service[0].via[0]?station.service[0].via:"?",u8g2_font_6x13B_tf);
+    destPos = badgeW+4;
   } else {
     destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
   }
@@ -2204,8 +2217,8 @@ void drawServiceLine(int line, int y) {
         u8g2.drawStr(0,y-1,ordinal);
         badgeX = 21;
       }
-      drawSTogBadge(badgeX,y-1,9,station.service[line].via[0]?station.service[line].via:"?",u8g2_font_6x10_tf);
-      destPos = badgeX+9+4;
+      int badgeW = drawSTogBadge(badgeX,y-1,9,station.service[line].via[0]?station.service[line].via:"?",u8g2_font_6x10_tf);
+      destPos = badgeX+badgeW+4;
     } else if (hideOrdinals) {
       destPos = u8g2.drawStr(0,y-1,station.service[line].sTime) + 6;
     } else {
