@@ -58,6 +58,10 @@ struct rdService {
     int serviceType;
     int timeToStation;  // Only for TfL
     bool isSTog;  // Rejseplanen catOut=="S-Tog" - drives the København H S-tog line-badge board style
+    char serviceID[MAXJOURNEYREFSIZE];  // LDBWS service id (UK) or JourneyDetailRef.ref token
+                                         // (Rejseplanen) - a genuinely unique identifier for this
+                                         // specific journey, unlike sTime+destination which two
+                                         // different services can coincidentally share.
   };
 
   struct rdStation {

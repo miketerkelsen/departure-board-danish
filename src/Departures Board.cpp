@@ -474,9 +474,12 @@ static bool isShowingVia=false;
 static bool trainDepartedAnimating = false;
 static int trainDepartedXpos = 0;
 static unsigned long trainDepartedMoveTime = 0; // millis() timestamp the icon starts sliding at, after resting in place
-static char trainDepartedFingerprint[64] = ""; // identifies the departure that last played the
-  // animation (sTime+destination, the closest thing to a stable id this data has), so it only
-  // plays once per departure rather than every frame while it lingers as service[0]
+static char trainDepartedFingerprint[320] = ""; // identifies the departure that last played the
+  // animation (sTime+destination+serviceID - serviceID is Rejseplanen's own unique id for this
+  // specific journey, included because sTime+destination alone can coincidentally match a genuinely
+  // different service - e.g. a shared round time and a common hub like København H), so it only
+  // plays once per departure rather than every frame while it lingers as service[0]. Sized to fit
+  // sTime+destination+serviceID (up to MAXJOURNEYREFSIZE) comfortably without truncating.
 static unsigned long serviceTimer=0;
 static unsigned long viaTimer=0;
 static unsigned long letbaneBlinkTimer=0;
@@ -2407,8 +2410,8 @@ void updateRailDepartures() {
   // silently drop it again (and anything else sharing its fingerprint) rather than display it.
   bool droppedRepeat = false;
   while (station.numServices && trainDepartedFingerprint[0]) {
-    char fp[64];
-    snprintf(fp,sizeof(fp),"%s|%s",station.service[0].sTime,station.service[0].destination);
+    char fp[320];
+    snprintf(fp,sizeof(fp),"%s|%s|%s",station.service[0].sTime,station.service[0].destination,station.service[0].serviceID);
     if (strcmp(fp,trainDepartedFingerprint)!=0) break;
     promoteNextService();
     droppedRepeat = true;
@@ -3341,8 +3344,8 @@ void departureBoardLoop() {
     sscanf(effTime,"%d:%d",&h,&m);
     long deltaSec = (long)(h*3600+m*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
     if (deltaSec < -3600) deltaSec += 86400; // midnight rollover - actually tomorrow's early departure, not overdue
-    char fingerprint[64];
-    snprintf(fingerprint,sizeof(fingerprint),"%s|%s",station.service[0].sTime,station.service[0].destination);
+    char fingerprint[320];
+    snprintf(fingerprint,sizeof(fingerprint),"%s|%s|%s",station.service[0].sTime,station.service[0].destination,station.service[0].serviceID);
     // S-tog runs frequently enough during busy periods that leaving a departed service up for the
     // usual full minute makes the board feel stale - clear it after 15 seconds there instead.
     long departedThresholdSec = useSTogStyle(0) ? -15 : -60;
@@ -3430,8 +3433,8 @@ void departureBoardLoop() {
         if (deltaSec2 < -3600) deltaSec2 += 86400;
         long departedThresholdSec2 = useSTogStyle(0) ? -15 : -60;
         if (deltaSec2 > departedThresholdSec2) break; // still upcoming - this is the new primary
-        char fingerprint2[64];
-        snprintf(fingerprint2,sizeof(fingerprint2),"%s|%s",station.service[0].sTime,station.service[0].destination);
+        char fingerprint2[320];
+        snprintf(fingerprint2,sizeof(fingerprint2),"%s|%s|%s",station.service[0].sTime,station.service[0].destination,station.service[0].serviceID);
         strlcpy(trainDepartedFingerprint,fingerprint2,sizeof(trainDepartedFingerprint));
         promoteNextService();
         // Whatever calling-at was just consumed/discarded above described the service this loop just

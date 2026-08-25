@@ -478,10 +478,9 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // The calling-at list only actually changes when the primary service itself changes, but this
     // used to call getServiceDetails() (a second, full HTTP request) on every single refresh
     // regardless - doubling the API call count for no benefit on the many cycles where the same
-    // service is still sitting at the top of the board. sTime+destination is the same "is this
-    // really the same departure" fingerprint used elsewhere (trainDepartedFingerprint in the main
-    // sketch) - when it matches, just carry the previous load's calling/origin forward instead of
-    // spending a real call to re-fetch text that hasn't changed.
+    // service is still sitting at the top of the board. When it matches, just carry the previous
+    // load's calling/origin forward instead of spending a real call to re-fetch text that hasn't
+    // changed.
     // station->calling is a station-level field ("only the first service returned"), not tied to any
     // particular service - so it's only trustworthy to reuse when it's known to actually describe
     // the CURRENT service[0]. The main sketch's departed-train animation promotes the next service
@@ -490,10 +489,20 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // was just promoted locally, whose calling-at was never actually fetched" - requiring it non-empty
     // catches that case and forces a real fetch instead of carrying the departed service's stops
     // forward onto the one that replaced it.
+    // serviceID (the JourneyDetailRef.ref token) is included alongside sTime+destination because
+    // those two alone aren't a reliably unique fingerprint - two genuinely different services can
+    // share a scheduled time and destination (a common round time, a shared hub like København H
+    // reached by several lines), and a stale station->service[0] left over from switching to a
+    // different location entirely (scheduler/carousel) could coincidentally match too. serviceID is
+    // Rejseplanen's own unique identifier for a specific journey, so requiring it as well can only
+    // make this check stricter (fewer accidental "same service" matches, never more) - the failure
+    // mode of getting this wrong was a real one: calling-at text visibly left over from a different,
+    // no longer relevant departure.
     bool samePrimaryService = fetchCallingPoints && xStation->numServices && station->numServices &&
         station->callingKnown &&
         strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
-        strcmp(xStation->service[0].destination,station->service[0].destination)==0;
+        strcmp(xStation->service[0].destination,station->service[0].destination)==0 &&
+        strcmp(xStation->service[0].serviceID,station->service[0].serviceID)==0;
     if (samePrimaryService) {
         strlcpy(xStation->service[0].calling, station->calling, sizeof(xStation->service[0].calling));
         strlcpy(xStation->service[0].origin, station->origin, sizeof(xStation->service[0].origin));
@@ -521,9 +530,12 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // of urgently right after the promotion that needs it. See rdStation::nextCalling and the
     // promotion code in the main sketch for how this gets consumed.
     if (fetchCallingPoints && xStation->numServices>1) {
+        // serviceID included here for the same reason as samePrimaryService above - sTime+
+        // destination alone isn't a reliably unique fingerprint.
         bool sameNext = station->numServices>1 && station->nextCallingKnown &&
             strcmp(xStation->service[1].sTime,station->service[1].sTime)==0 &&
-            strcmp(xStation->service[1].destination,station->service[1].destination)==0;
+            strcmp(xStation->service[1].destination,station->service[1].destination)==0 &&
+            strcmp(xStation->service[1].serviceID,station->service[1].serviceID)==0;
         if (sameNext) {
             strlcpy(xStation->service[1].calling, station->nextCalling, sizeof(xStation->service[1].calling));
             strlcpy(xStation->service[1].origin, station->nextOrigin, sizeof(xStation->service[1].origin));
@@ -708,6 +720,7 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         strlcpy(station->service[i].stopArea, xStation->service[i].stopArea, sizeof(station->service[0].stopArea));
         station->service[i].serviceType = xStation->service[i].serviceType;
         station->service[i].isSTog = xStation->service[i].isSTog;
+        strlcpy(station->service[i].serviceID, xStation->service[i].serviceID, sizeof(station->service[0].serviceID));
     }
     if (xStation->numServices) {
         strlcpy(station->calling, xStation->service[0].calling, sizeof(station->calling));
