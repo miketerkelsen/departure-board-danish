@@ -3301,8 +3301,8 @@ void departureBoardLoop() {
     char fingerprint[64];
     snprintf(fingerprint,sizeof(fingerprint),"%s|%s",station.service[0].sTime,station.service[0].destination);
     // S-tog runs frequently enough during busy periods that leaving a departed service up for the
-    // usual full minute makes the board feel stale - clear it after half a minute instead there.
-    long departedThresholdSec = useSTogStyle(0) ? -30 : -60;
+    // usual full minute makes the board feel stale - clear it after 15 seconds there instead.
+    long departedThresholdSec = useSTogStyle(0) ? -15 : -60;
     if (deltaSec <= departedThresholdSec && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
