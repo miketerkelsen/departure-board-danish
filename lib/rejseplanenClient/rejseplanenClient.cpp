@@ -490,7 +490,15 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         strlcpy(xStation->service[0].calling, station->calling, sizeof(xStation->service[0].calling));
         strlcpy(xStation->service[0].origin, station->origin, sizeof(xStation->service[0].origin));
     } else if (fetchCallingPoints && xStation->numServices && xStation->service[0].serviceID[0]) {
-        getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
+        // The overall board fetch above already succeeded (that's how we got here), so this being
+        // slow/failing shouldn't fail the whole board - the board just displays with a blank
+        // calling-at line until it succeeds. But that used to be entirely silent, with nothing
+        // recording it even happened - note it in lastResultMessage so it's visible via /info
+        // instead of just quietly not showing calling-at points with no way to tell why.
+        int callingResult = getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
+        if (callingResult != UPD_SUCCESS) {
+            sprintf(js->lastResultMessage+strlen(js->lastResultMessage)," [calling-at fetch failed: %d]",callingResult);
+        }
     }
 
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
@@ -560,7 +568,14 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     fetchingDepartures = false;
 
     char c;
-    dataSendTimeout = millis() + 12000UL;
+    // S-tog stops at every local station, so its journeyDetail responses run far larger than a
+    // typical intercity Tog service's (a real København H S-tog journey measured here came to
+    // 32KB across 27 stops, each with its own Notes block) - parsing that much JSON one byte at a
+    // time, potentially while the other core is busy rendering, doesn't reliably fit in the 12s this
+    // used to allow. That silently discarded the whole result (see the UPD_TIMEOUT check below), and
+    // since S-tog structurally has more stops than most other services, it lost this race far more
+    // consistently than Tog ever would - not a network issue, just not enough headroom for the size.
+    dataSendTimeout = millis() + 25000UL;
     while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
         while (httpsClient.available()) {
             c = httpsClient.read();
