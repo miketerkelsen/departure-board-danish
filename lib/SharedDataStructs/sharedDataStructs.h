@@ -67,6 +67,12 @@ struct rdService {
     bool boardChanged;  // Only for TfL
     char calling[MAXCALLINGSIZE];   // Only store the calling stops for the first service returned
     char origin[MAXLOCATIONSIZE]; // Only store the origin for the first service returned
+    // True once a calling-at fetch has actually succeeded for the current primary service - false
+    // means "we don't know yet" (still fetching, or the last attempt failed/timed out), NOT "this
+    // service has no further stops"/"genuinely originates here". Without this, an empty calling/
+    // origin from a failed or not-yet-completed fetch looked identical to a real origin service with
+    // nothing to show, so the board displayed "starts here" as if it knew that, when it didn't.
+    bool callingKnown;
     char serviceMessage[MAXMESSAGESIZE];  // Only store the service message for the first service returned
     rdService service[MAXBOARDSERVICES];
   };

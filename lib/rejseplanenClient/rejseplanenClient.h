@@ -112,6 +112,12 @@ class rejseplanenClient: public JsonListenerGS {
         // journeyDetail (calling points) state
         rjStopEntry callingStops[40];
         int numCallingStops = 0;
+        // Whether calling-at info for the current primary service is actually known this cycle -
+        // either just freshly fetched, or validly reused from a previous fetch (the samePrimaryService
+        // fast path). False when it was never attempted, still in flight, or the last attempt failed -
+        // read by loadDepartures() to set rdStation::callingKnown (see its own comment for why this
+        // matters).
+        bool callingFetchKnown = false;
 
         static bool compareTimes(const rdiService& a, const rdiService& b);
         void resetRawRecord();

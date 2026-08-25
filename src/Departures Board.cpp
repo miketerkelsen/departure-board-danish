@@ -2326,8 +2326,12 @@ void drawStationBoard() {
           numMessages++;
         }
         // Rejseplanen's client leaves station.origin blank whenever the requested stop IS the
-        // service's origin, so that's a direct signal - no need to compare names.
-        if (!station.origin[0]) {
+        // service's origin, so that's a direct signal - no need to compare names. But it's ALSO
+        // blank whenever the calling-at fetch simply hasn't succeeded yet (still fetching, or the
+        // last attempt failed) - callingKnown distinguishes "confirmed this service starts here"
+        // from "don't actually know yet", so a slow/failed fetch no longer gets shown as a false
+        // "starts here" (see rdStation::callingKnown's own comment for the full reasoning).
+        if (station.callingKnown && !station.origin[0]) {
           // Service originates at this station. opco is the operator name straight from
           // Rejseplanen (e.g. "DSB", "DSB S-tog") - some of those already contain "tog" (S-tog's
           // does), so appending "-tog" unconditionally produced "Dette DSB S-tog-tog starter her."
@@ -2411,9 +2415,12 @@ void updateRailDepartures() {
   }
   if (droppedRepeat) {
     // station.calling/origin still describe the entry just dropped above, not whatever's primary
-    // now - same reasoning as the departed-train animation's own promotion (see there).
+    // now - same reasoning as the departed-train animation's own promotion (see there). callingKnown
+    // must be cleared too, so drawStationBoard() shows neither the (now-wrong) calling-at text nor a
+    // false "starts here" - it genuinely doesn't know either way yet for whatever's primary now.
     station.calling[0] = '\0';
     station.origin[0] = '\0';
+    station.callingKnown = false;
   }
   lastDataLoadTime = millis();
   noDataLoaded = false;
@@ -3379,8 +3386,11 @@ void departureBoardLoop() {
       // still the same service as last fetch" and "same service I only just promoted to locally,
       // whose calling-at was never actually fetched" - without this, the first fetch after a
       // promotion could wrongly carry the departed service's stops forward onto the new primary.
+      // callingKnown also goes false here - the new primary's calling-at is genuinely unknown until
+      // a fetch actually succeeds for it, not "known to have none" (see its own comment).
       station.calling[0] = '\0';
       station.origin[0] = '\0';
+      station.callingKnown = false;
       // If whatever's now primary ALSO already passed its own departed-threshold, it left too close
       // behind the one that just animated away to be worth a separate animation of its own - S-tog
       // in particular can run services only moments apart during busy periods. Keep silently

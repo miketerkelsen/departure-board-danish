@@ -491,19 +491,25 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // catches that case and forces a real fetch instead of carrying the departed service's stops
     // forward onto the one that replaced it.
     bool samePrimaryService = fetchCallingPoints && xStation->numServices && station->numServices &&
-        station->calling[0] &&
+        station->callingKnown &&
         strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
         strcmp(xStation->service[0].destination,station->service[0].destination)==0;
     if (samePrimaryService) {
         strlcpy(xStation->service[0].calling, station->calling, sizeof(xStation->service[0].calling));
         strlcpy(xStation->service[0].origin, station->origin, sizeof(xStation->service[0].origin));
+        callingFetchKnown = true;
     } else if (fetchCallingPoints && xStation->numServices && xStation->service[0].serviceID[0]) {
         // The overall board fetch above already succeeded (that's how we got here), so this being
         // slow/failing shouldn't fail the whole board - the board just displays with a blank
         // calling-at line until it succeeds. getServiceDetails() logs its own compact timing/result
         // into js->lastResultMessage regardless of outcome, so a failure here is visible via /info
-        // instead of being entirely silent.
-        getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
+        // instead of being entirely silent. callingFetchKnown only becomes true on an actual success -
+        // loadDepartures() uses that (not calling[0]/origin[0] being non-empty) to tell "we know this
+        // service has no further calling points" apart from "we don't know yet, the fetch failed" -
+        // see rdStation::callingKnown's own comment for why that distinction matters.
+        callingFetchKnown = (getServiceDetails(xStation->service[0].serviceID, accessId, stopId) == UPD_SUCCESS);
+    } else {
+        callingFetchKnown = false;
     }
 
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
@@ -682,6 +688,9 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         strlcpy(station->calling, xStation->service[0].calling, sizeof(station->calling));
         strlcpy(station->origin, xStation->service[0].origin, sizeof(station->origin));
         strlcpy(station->serviceMessage, xStation->service[0].serviceMessage, sizeof(station->serviceMessage));
+        station->callingKnown = callingFetchKnown;
+    } else {
+        station->callingKnown = false;
     }
 }
 
