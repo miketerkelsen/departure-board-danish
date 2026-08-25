@@ -337,6 +337,83 @@ void rejseplanenClient::endObject() {
 
 void rejseplanenClient::endDocument() {}
 
+// See declaration comment in rejseplanenClient.h.
+int rejseplanenClient::readResponseHeaders(WiFiClientSecure &client, long &contentLength, bool &serverAllowsReuse, bool &chunked) {
+    contentLength = -1;
+    serverAllowsReuse = true;
+    chunked = false;
+
+    int retryCounter = 0;
+    while (!client.available()) {
+        delay(100);
+        retryCounter++;
+        if (retryCounter>=80) return UPD_TIMEOUT;
+    }
+
+    String statusLine = client.readStringUntil('\n');
+    if (!statusLine.startsWith("HTTP/") || statusLine.indexOf("200 OK") == -1) {
+        if (statusLine.indexOf("401") > 0 || statusLine.indexOf("403") > 0) return UPD_UNAUTHORISED;
+        else if (statusLine.indexOf("500") > 0) return UPD_DATA_ERROR;
+        else return UPD_HTTP_ERROR;
+    }
+
+    unsigned long headerDeadline = millis() + 1000UL;
+    while ((client.available() || client.connected()) && (millis() < headerDeadline)) {
+        String line = client.readStringUntil('\n');
+        if (line.startsWith("Content-Length:")) contentLength = line.substring(16).toInt();
+        else if (line.startsWith("Transfer-Encoding:") && line.indexOf("chunked") >= 0) chunked = true;
+        else if (line.startsWith("Connection:") && line.indexOf("close") >= 0) serverAllowsReuse = false;
+        if (line == "\r") break;
+        delay(1);
+    }
+    return UPD_SUCCESS;
+}
+
+// See declaration comment in rejseplanenClient.h.
+long rejseplanenClient::readResponseBody(WiFiClientSecure &client, long contentLength, JsonStreamingParserGS &parser, unsigned long timeoutMs, bool &timedOut) {
+    timedOut = false;
+    long received = 0;
+    uint8_t chunk[512];
+    unsigned long deadline = millis() + timeoutMs;
+
+    if (contentLength >= 0) {
+        // Known body length (the normal, keep-alive-eligible case) - read exactly that many bytes and
+        // stop, leaving whatever the server sends next (if anything) untouched for the next request.
+        while (received < contentLength) {
+            if (millis() >= deadline) { timedOut = true; break; }
+            int avail = client.available();
+            if (avail > 0) {
+                long want = contentLength - received;
+                if (want > (long)sizeof(chunk)) want = sizeof(chunk);
+                if (avail > (int)want) avail = (int)want;
+                int n = client.read(chunk, avail);
+                for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
+                received += n;
+            } else if (!client.connected()) {
+                timedOut = true; // connection dropped before delivering everything promised
+                break;
+            } else {
+                delay(5);
+            }
+        }
+    } else {
+        // No Content-Length header seen - fall back to the pre-keep-alive behaviour of reading until
+        // the connection itself closes. The caller must not try to reuse the connection afterward.
+        while (client.available() || client.connected()) {
+            if (millis() >= deadline) { timedOut = true; break; }
+            int avail = client.available();
+            if (avail > 0) {
+                int n = client.read(chunk, avail > (int)sizeof(chunk) ? (int)sizeof(chunk) : avail);
+                for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
+                received += n;
+            } else {
+                delay(5);
+            }
+        }
+    }
+    return received;
+}
+
 //
 // Fetches the departure board for a stop and (optionally) the calling points for the first service
 //
@@ -370,6 +447,16 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     }
     numCallingStops = 0;
 
+    // Kept open across this departureBoard request AND (when fetchCallingPoints ends up needing a
+    // real fetch rather than a cache hit) the getServiceDetails() call(s) below, via HTTP keep-alive -
+    // confirmed live against the real server (curl showed it answering "Connection: keep-alive" and
+    // genuinely reusing one TCP connection for a second request). Previously each of up to 3 requests
+    // per fetch cycle (this one + up to 2x calling-at) opened its own fresh TCP+TLS connection from
+    // scratch. That cost barely mattered for Tog, where the calling-at cache-hit check below skips
+    // the extra requests entirely on almost every cycle (a service usually stays primary for many
+    // refreshes) - but S-tog's services turn over every few minutes, so it was needing BOTH extra
+    // connections on nearly every cycle, each an independent full-handshake failure point. Reusing
+    // one connection cuts that back down to a single handshake per cycle either way.
     WiFiClientSecure httpsClient;
     httpsClient.setInsecure();
     httpsClient.setTimeout(8000);
@@ -396,35 +483,18 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         request += "&time=" + String(timeParam);
     }
     if (callingStopId && callingStopId[0]) request += "&direction=" + String(callingStopId);
-    request += " HTTP/1.0\r\nHost: " + String(rjHost) + "\r\nConnection: close\r\n\r\n";
+    request += " HTTP/1.1\r\nHost: " + String(rjHost) + "\r\nConnection: keep-alive\r\n\r\n";
 
     httpsClient.print(request);
 
-    retryCounter = 0;
-    while (!httpsClient.available()) {
-        delay(100);
-        retryCounter++;
-        if (retryCounter>=80) {
-            httpsClient.stop();
-            strcpy(js->lastResultMessage,"Error: GET timed out");
-            return UPD_TIMEOUT;
-        }
-    }
-
-    String statusLine = httpsClient.readStringUntil('\n');
-    if (!statusLine.startsWith("HTTP/") || statusLine.indexOf("200 OK") == -1) {
+    long contentLength = -1;
+    bool serverAllowsReuse = true;
+    int headerResult = readResponseHeaders(httpsClient, contentLength, serverAllowsReuse, bChunked);
+    if (headerResult != UPD_SUCCESS) {
         httpsClient.stop();
-        strlcpy(js->lastResultMessage,statusLine.c_str(),sizeof(js->lastResultMessage));
-        if (statusLine.indexOf("401") > 0 || statusLine.indexOf("403") > 0) return UPD_UNAUTHORISED;
-        else if (statusLine.indexOf("500") > 0) return UPD_DATA_ERROR;
-        else return UPD_HTTP_ERROR;
-    }
-    unsigned long dataSendTimeout = millis() + 1000UL;
-    while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
-        String line = httpsClient.readStringUntil('\n');
-        if (line.startsWith("Transfer-Encoding:") && line.indexOf("chunked") >= 0) bChunked = true;
-        if (line == "\r") break;
-        delay(1);
+        if (headerResult == UPD_TIMEOUT) strcpy(js->lastResultMessage,"Error: GET timed out");
+        else sprintf(js->lastResultMessage,"Error: HTTP status %d",headerResult);
+        return headerResult;
     }
 
     JsonStreamingParserGS parser;
@@ -432,32 +502,23 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     parser.reset();
     fetchingDepartures = true;
 
-    long dataReceived = 0;
-    uint8_t chunk[512];
-    dataSendTimeout = millis() + 12000UL;
     perfTimer = millis();
-    while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
-        int avail = httpsClient.available();
-        if (avail > 0) {
-            // Reading in chunks instead of one byte per WiFiClientSecure::read() call cuts the
-            // per-byte TLS/socket call overhead drastically (down from ~1 call per byte to ~1 per
-            // 512) - the JSON parser itself still runs byte-by-byte (it's a streaming state machine,
-            // that part is inherent), but the actual network I/O, which is the dominant cost, isn't.
-            int n = httpsClient.read(chunk, avail > (int)sizeof(chunk) ? (int)sizeof(chunk) : avail);
-            for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
-            dataReceived += n;
-        } else {
-            delay(5);
-        }
-    }
-    httpsClient.stop();
+    bool bodyTimedOut = false;
+    long dataReceived = readResponseBody(httpsClient, contentLength, parser, 12000UL, bodyTimedOut);
 
-    if (millis() >= dataSendTimeout) {
-        sprintf(js->lastResultMessage,"Error: Timeout after %d bytes",dataReceived);
+    // Only safe to hand this same connection to getServiceDetails() below when the server didn't ask
+    // to close it, the body actually finished (not abandoned mid-read), and the socket's still up -
+    // readResponseBody() already stopped tracking as "reusable" the moment any of those went wrong.
+    bool canReuseConnection = serverAllowsReuse && !bodyTimedOut && contentLength >= 0 && httpsClient.connected();
+    if (!canReuseConnection) httpsClient.stop();
+
+    if (bodyTimedOut) {
+        sprintf(js->lastResultMessage,"Error: Timeout after %ld bytes",dataReceived);
         return UPD_TIMEOUT;
     }
 
     if (xStation->numServices == 0 && dataReceived < 20) {
+        httpsClient.stop();
         strcpy(js->lastResultMessage,"Error: Incomplete data");
         return UPD_DATA_ERROR;
     }
@@ -516,7 +577,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         // loadDepartures() uses that (not calling[0]/origin[0] being non-empty) to tell "we know this
         // service has no further calling points" apart from "we don't know yet, the fetch failed" -
         // see rdStation::callingKnown's own comment for why that distinction matters.
-        callingFetchKnown = (getServiceDetails(xStation->service[0].serviceID, accessId, stopId, 0) == UPD_SUCCESS);
+        callingFetchKnown = (getServiceDetails(httpsClient, xStation->service[0].serviceID, accessId, stopId, 0) == UPD_SUCCESS);
     } else {
         callingFetchKnown = false;
     }
@@ -541,13 +602,18 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
             strlcpy(xStation->service[1].origin, station->nextOrigin, sizeof(xStation->service[1].origin));
             nextCallingFetchKnown = true;
         } else if (xStation->service[1].serviceID[0]) {
-            nextCallingFetchKnown = (getServiceDetails(xStation->service[1].serviceID, accessId, stopId, 1) == UPD_SUCCESS);
+            nextCallingFetchKnown = (getServiceDetails(httpsClient, xStation->service[1].serviceID, accessId, stopId, 1) == UPD_SUCCESS);
         } else {
             nextCallingFetchKnown = false;
         }
     } else {
         nextCallingFetchKnown = false;
     }
+
+    // Whatever's left of the connection (still open if the last getServiceDetails() call above left
+    // it reusable) is done being useful for this cycle - release it now rather than holding a socket
+    // open between fetchDepartures() invocations (~45-90s apart) for no benefit.
+    httpsClient.stop();
 
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
     sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"[RP] OK: D:%d T:%d S:%d %s",dataReceived,millis()-perfTimer,uxHighWaterMark,bChunked?"C!":"");
@@ -558,7 +624,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
 // Fetches the calling points (journeyDetail) for the primary service and builds the
 // "Stopper ved: ..." list for whatever stops remain after the requested stop.
 //
-int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, const char *stopId, int targetIdx) {
+int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const char *ref, const char *accessId, const char *stopId, int targetIdx) {
     // Live-tested this against the real API: response sizes (18-34KB) and this machine's own
     // transfer time (<0.3s) didn't point at either being the bottleneck on their own, which means
     // whatever's actually slow is specific to the ESP32's own connect/TLS/parse path - something
@@ -568,20 +634,25 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     // caller in fetchDepartures() appends its own summary after this).
     unsigned long tStart = millis();
 
-    WiFiClientSecure httpsClient;
-    httpsClient.setInsecure();
-    httpsClient.setTimeout(8000);
-    httpsClient.setConnectionTimeout(8000);
-    httpsClient.setNoDelay(false);
-
-    int retryCounter = 0;
-    while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 10)) {
-        delay(100);
-        retryCounter++;
-    }
-    if (retryCounter>=10) {
-        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn-fail %lums ",millis()-tStart);
-        return UPD_NO_RESPONSE;
+    // httpsClient normally arrives here already connected - fetchDepartures() hands over the same
+    // keep-alive connection it just used for the departureBoard request (see its own comment for
+    // why). Only reconnect from scratch if that didn't pan out (server closed it, a previous call on
+    // it timed out, or - for the position-1 pre-fetch - the position-0 call above already used and
+    // released it): this makes reuse a pure bonus, never a new failure mode of its own.
+    if (!httpsClient.connected()) {
+        httpsClient.setInsecure();
+        httpsClient.setTimeout(8000);
+        httpsClient.setConnectionTimeout(8000);
+        httpsClient.setNoDelay(false);
+        int retryCounter = 0;
+        while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 10)) {
+            delay(100);
+            retryCounter++;
+        }
+        if (retryCounter>=10) {
+            sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn-fail %lums ",millis()-tStart);
+            return UPD_NO_RESPONSE;
+        }
     }
     unsigned long tConnected = millis();
 
@@ -597,41 +668,33 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
         }
     }
 
-    String request = String("GET ") + rjJourneyDetailApi + "?accessId=" + String(accessId) + "&format=json&id=" + encodedRef + " HTTP/1.0\r\nHost: " + String(rjHost) + "\r\nConnection: close\r\n\r\n";
+    String request = String("GET ") + rjJourneyDetailApi + "?accessId=" + String(accessId) + "&format=json&id=" + encodedRef + " HTTP/1.1\r\nHost: " + String(rjHost) + "\r\nConnection: keep-alive\r\n\r\n";
     httpsClient.print(request);
 
-    retryCounter = 0;
-    while (!httpsClient.available()) {
-        delay(100);
-        retryCounter++;
-        if (retryCounter>=80) {
-            httpsClient.stop();
-            sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn%lu resp-fail %lums ",tConnected-tStart,millis()-tStart);
-            return UPD_TIMEOUT;
-        }
-    }
-
-    String statusLine = httpsClient.readStringUntil('\n');
-    if (!statusLine.startsWith("HTTP/") || statusLine.indexOf("200 OK") == -1) {
-        httpsClient.stop();
-        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn%lu http-err %lums ",tConnected-tStart,millis()-tStart);
-        return UPD_HTTP_ERROR;
-    }
-    unsigned long dataSendTimeout = millis() + 1000UL;
-    while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
-        String line = httpsClient.readStringUntil('\n');
-        if (line == "\r") break;
-        delay(1);
-    }
+    long contentLength = -1;
+    bool serverAllowsReuse = true;
+    bool chunkedUnused = false;
+    int headerResult = readResponseHeaders(httpsClient, contentLength, serverAllowsReuse, chunkedUnused);
     unsigned long tHeaders = millis();
+    if (headerResult != UPD_SUCCESS) {
+        httpsClient.stop();
+        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn%lu %s %lums ",tConnected-tStart,headerResult==UPD_TIMEOUT?"resp-fail":"http-err",millis()-tStart);
+        return headerResult;
+    }
 
     JsonStreamingParserGS parser;
     parser.setListener(this);
     parser.reset();
     fetchingDepartures = false;
+    // callingStops[]/numCallingStops is scratch space shared across BOTH calls this function can make
+    // in one fetchDepartures() cycle (targetIdx 0, then 1 for the position-1 pre-fetch) - fetchDepartures()
+    // only zeroes numCallingStops once, before either call. Without resetting it here too, the second
+    // call would append its stops after whatever the first call left behind instead of starting clean,
+    // and the match-the-requested-stop search below (which breaks on the FIRST extId match) could then
+    // land inside the FIRST call's leftover stops - building the "calling at" list from the wrong
+    // service's route entirely. Resetting per-call keeps each fetch's result scoped to its own journey.
+    numCallingStops = 0;
 
-    long bytesReceived = 0;
-    uint8_t chunk[512];
     // S-tog stops at every local station, so its journeyDetail responses run far larger than a
     // typical intercity Tog service's (a real København H S-tog journey measured here came to
     // 32KB across 27 stops, each with its own Notes block). Reading a single byte per
@@ -642,23 +705,19 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     // streaming state machine, that part is inherent) - genuinely faster, not just given more time
     // to be slow. Response size/transfer time tested fine from a normal connection (18-34KB,
     // <0.3s), so whatever's actually slow is specific to the ESP32's own connect/parse path -
-    // raising this further to 35s as a safe hedge while the new timing log above (js-
-    // >lastResultMessage, see /info) gathers real numbers from the actual hardware.
-    dataSendTimeout = millis() + 35000UL;
-    while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
-        int avail = httpsClient.available();
-        if (avail > 0) {
-            int n = httpsClient.read(chunk, avail > (int)sizeof(chunk) ? (int)sizeof(chunk) : avail);
-            for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
-            bytesReceived += n;
-        } else {
-            delay(5);
-        }
-    }
-    httpsClient.stop();
+    // raising this further to 35s as a safe hedge while the timing log below (js->lastResultMessage,
+    // see /info) gathers real numbers from the actual hardware.
+    bool bodyTimedOut = false;
+    long bytesReceived = readResponseBody(httpsClient, contentLength, parser, 35000UL, bodyTimedOut);
     unsigned long tDone = millis();
 
-    if (millis() >= dataSendTimeout || numCallingStops == 0) {
+    // Same reuse conditions as fetchDepartures() - only leave the connection open for a possible
+    // follow-up call (the position-1 pre-fetch, reusing what position-0 just used) when the server
+    // allowed it, the body genuinely finished, and the socket's still actually up.
+    bool canReuseConnection = serverAllowsReuse && !bodyTimedOut && contentLength >= 0 && httpsClient.connected();
+    if (!canReuseConnection) httpsClient.stop();
+
+    if (bodyTimedOut || numCallingStops == 0) {
         sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:c%luh%lup%lu B%ld stops%d TIMEOUT ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived,numCallingStops);
         return UPD_TIMEOUT;
     }

@@ -17,6 +17,7 @@
 #include "JsonStreamingParserGS.h"
 #include <sharedDataStructs.h>
 #include <responseCodes.h>
+#include <WiFiClientSecure.h>
 
 #define MAXPATHSTACK 12                // headroom for deeply-nested fields (e.g. service alert Messages)
 
@@ -128,7 +129,27 @@ class rejseplanenClient: public JsonListenerGS {
         void buildCurrentPath(const char* key);
         // targetIdx selects which xStation->service[] slot to populate (calling/origin) - 0 for the
         // primary service, 1 for the pre-fetch of whatever's next in line (see rdStation::nextCalling).
-        int getServiceDetails(const char *ref, const char *accessId, const char *stopId, int targetIdx);
+        // httpsClient is the SAME connection fetchDepartures() already used for the departureBoard
+        // request, passed in by reference so this can reuse it (HTTP keep-alive) instead of paying
+        // for a whole new TCP+TLS handshake - see the keep-alive comment in fetchDepartures() for why.
+        // Reconnects on its own if the connection isn't already open (e.g. the server closed it, or
+        // this is being called for slot 1 after slot 0's connection turned out non-reusable), so this
+        // is never worse than the old always-fresh-connection behaviour, only sometimes better.
+        int getServiceDetails(WiFiClientSecure &httpsClient, const char *ref, const char *accessId, const char *stopId, int targetIdx);
+        // Reads the status line + headers of an HTTP response already sent on `client`, returning the
+        // Content-Length (-1 if the header was absent) and whether the server/response allows the
+        // connection to be kept open for a follow-up request (false if the server itself sent
+        // "Connection: close"). Shared by fetchDepartures() and getServiceDetails() so the keep-alive
+        // bookkeeping only needs to be right in one place. Waits up to 8s for the response to start,
+        // then up to 1s to walk the header block - same budget both call sites used before this was
+        // factored out.
+        int readResponseHeaders(WiFiClientSecure &client, long &contentLength, bool &serverAllowsReuse, bool &chunked);
+        // Reads exactly contentLength bytes (or, if contentLength<0, until the connection closes - the
+        // pre-keep-alive fallback for a response with no Content-Length header) from `client`, feeding
+        // each byte to parser as it arrives. Returns bytes actually read; sets timedOut true if the
+        // deadline was hit (contentLength case) or the connection dropped before delivering everything
+        // promised - callers treat that as a failed fetch and must NOT reuse the connection afterward.
+        long readResponseBody(WiFiClientSecure &client, long contentLength, JsonStreamingParserGS &parser, unsigned long timeoutMs, bool &timedOut);
 
         virtual void whitespace(char c);
         virtual void startDocument();
