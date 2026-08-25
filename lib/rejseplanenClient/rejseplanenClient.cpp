@@ -433,16 +433,22 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     fetchingDepartures = true;
 
     long dataReceived = 0;
-    char c;
+    uint8_t chunk[512];
     dataSendTimeout = millis() + 12000UL;
     perfTimer = millis();
     while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
-        while (httpsClient.available()) {
-            c = httpsClient.read();
-            parser.parse(c);
-            dataReceived++;
+        int avail = httpsClient.available();
+        if (avail > 0) {
+            // Reading in chunks instead of one byte per WiFiClientSecure::read() call cuts the
+            // per-byte TLS/socket call overhead drastically (down from ~1 call per byte to ~1 per
+            // 512) - the JSON parser itself still runs byte-by-byte (it's a streaming state machine,
+            // that part is inherent), but the actual network I/O, which is the dominant cost, isn't.
+            int n = httpsClient.read(chunk, avail > (int)sizeof(chunk) ? (int)sizeof(chunk) : avail);
+            for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
+            dataReceived += n;
+        } else {
+            delay(5);
         }
-        delay(5);
     }
     httpsClient.stop();
 
@@ -569,21 +575,25 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     parser.reset();
     fetchingDepartures = false;
 
-    char c;
+    uint8_t chunk[512];
     // S-tog stops at every local station, so its journeyDetail responses run far larger than a
     // typical intercity Tog service's (a real København H S-tog journey measured here came to
-    // 32KB across 27 stops, each with its own Notes block) - parsing that much JSON one byte at a
-    // time, potentially while the other core is busy rendering, doesn't reliably fit in the 12s this
-    // used to allow. That silently discarded the whole result (see the UPD_TIMEOUT check below), and
-    // since S-tog structurally has more stops than most other services, it lost this race far more
-    // consistently than Tog ever would - not a network issue, just not enough headroom for the size.
+    // 32KB across 27 stops, each with its own Notes block). Reading a single byte per
+    // WiFiClientSecure::read() call, as this used to, means ~32000 individual TLS/socket calls for
+    // a response that size - real, measurable overhead on top of the parser's own per-byte work, and
+    // the actual reason this didn't reliably fit the old 12s window. Reading in chunks instead cuts
+    // that network-call overhead by ~500x (the parser itself is still fed byte-by-byte - it's a
+    // streaming state machine, that part is inherent) - genuinely faster, not just given more time
+    // to be slow. 25s (raised from 12s) stays as a sane worst-case ceiling on top of that.
     dataSendTimeout = millis() + 25000UL;
     while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
-        while (httpsClient.available()) {
-            c = httpsClient.read();
-            parser.parse(c);
+        int avail = httpsClient.available();
+        if (avail > 0) {
+            int n = httpsClient.read(chunk, avail > (int)sizeof(chunk) ? (int)sizeof(chunk) : avail);
+            for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
+        } else {
+            delay(5);
         }
-        delay(5);
     }
     httpsClient.stop();
 

@@ -2266,6 +2266,9 @@ bool isCallingMessage(const char* msg) {
   return strncmp("Stopper",msg,7)==0;
 }
 
+// Forward declaration - defined further down, needed here for the "originates here" message below.
+static bool containsCaseInsensitive(const char* haystack, const char* needle);
+
 // Draw the initial Departures Board
 void drawStationBoard() {
   if (showClockNoServices && station.numServices == 0) {
@@ -2325,9 +2328,14 @@ void drawStationBoard() {
         // Rejseplanen's client leaves station.origin blank whenever the requested stop IS the
         // service's origin, so that's a direct signal - no need to compare names.
         if (!station.origin[0]) {
-          // Service originates at this station
-          if (station.service[0].opco[0]) {
+          // Service originates at this station. opco is the operator name straight from
+          // Rejseplanen (e.g. "DSB", "DSB S-tog") - some of those already contain "tog" (S-tog's
+          // does), so appending "-tog" unconditionally produced "Dette DSB S-tog-tog starter her."
+          // Only add the suffix when opco doesn't already have it.
+          if (station.service[0].opco[0] && !containsCaseInsensitive(station.service[0].opco,"tog")) {
             sprintf(line2[numMessages],"Dette %s-tog starter her.",station.service[0].opco);
+          } else if (station.service[0].opco[0]) {
+            sprintf(line2[numMessages],"Dette %s starter her.",station.service[0].opco);
           } else {
             strcpy(line2[numMessages],"Dette tog starter her.");
           }
