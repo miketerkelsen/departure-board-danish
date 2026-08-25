@@ -507,9 +507,34 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         // loadDepartures() uses that (not calling[0]/origin[0] being non-empty) to tell "we know this
         // service has no further calling points" apart from "we don't know yet, the fetch failed" -
         // see rdStation::callingKnown's own comment for why that distinction matters.
-        callingFetchKnown = (getServiceDetails(xStation->service[0].serviceID, accessId, stopId) == UPD_SUCCESS);
+        callingFetchKnown = (getServiceDetails(xStation->service[0].serviceID, accessId, stopId, 0) == UPD_SUCCESS);
     } else {
         callingFetchKnown = false;
+    }
+
+    // Pre-fetch calling-at for whatever's sitting in position [1] too, the same way as above but one
+    // slot over - by the time it's eventually promoted into position [0] (the current primary having
+    // departed), it's usually already known instead of racing a fresh fetch against the ~3.5s
+    // departed-train animation window. This does NOT raise the steady-state fetch rate: every service
+    // that ever reaches position [0] already sat in position [1] first, so it's the same one fetch
+    // per service - just made a cycle (or more) earlier, while there's still real lead time, instead
+    // of urgently right after the promotion that needs it. See rdStation::nextCalling and the
+    // promotion code in the main sketch for how this gets consumed.
+    if (fetchCallingPoints && xStation->numServices>1) {
+        bool sameNext = station->numServices>1 && station->nextCallingKnown &&
+            strcmp(xStation->service[1].sTime,station->service[1].sTime)==0 &&
+            strcmp(xStation->service[1].destination,station->service[1].destination)==0;
+        if (sameNext) {
+            strlcpy(xStation->service[1].calling, station->nextCalling, sizeof(xStation->service[1].calling));
+            strlcpy(xStation->service[1].origin, station->nextOrigin, sizeof(xStation->service[1].origin));
+            nextCallingFetchKnown = true;
+        } else if (xStation->service[1].serviceID[0]) {
+            nextCallingFetchKnown = (getServiceDetails(xStation->service[1].serviceID, accessId, stopId, 1) == UPD_SUCCESS);
+        } else {
+            nextCallingFetchKnown = false;
+        }
+    } else {
+        nextCallingFetchKnown = false;
     }
 
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
@@ -521,7 +546,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
 // Fetches the calling points (journeyDetail) for the primary service and builds the
 // "Stopper ved: ..." list for whatever stops remain after the requested stop.
 //
-int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, const char *stopId) {
+int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, const char *stopId, int targetIdx) {
     // Live-tested this against the real API: response sizes (18-34KB) and this machine's own
     // transfer time (<0.3s) didn't point at either being the bottleneck on their own, which means
     // whatever's actually slow is specific to the ESP32's own connect/TLS/parse path - something
@@ -633,29 +658,29 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
         if (strcmp(callingStops[i].extId, stopId)==0) { matchIdx = i; break; }
     }
 
-    xStation->service[0].calling[0] = '\0';
-    xStation->service[0].origin[0] = '\0';
+    xStation->service[targetIdx].calling[0] = '\0';
+    xStation->service[targetIdx].origin[0] = '\0';
 
     // S-tog services can call at a dozen-plus stops, and with a "(HH:MM)" on every one the
     // "Stopper ved" list gets long enough to feel endless - drop the times there and just list stop
     // names (the board still shows the S-tog line's own minute countdown separately). Not tied to
     // any specific station - any S-tog service benefits, whether reached via a mixed DK Rail board
     // at København H or the dedicated S-tog mode at any other S-tog-served stop.
-    bool omitCallingTimes = xStation->service[0].isSTog;
+    bool omitCallingTimes = xStation->service[targetIdx].isSTog;
 
     if (matchIdx >= 0) {
-        if (matchIdx > 0) strlcpy(xStation->service[0].origin, callingStops[0].name, sizeof(xStation->service[0].origin));
+        if (matchIdx > 0) strlcpy(xStation->service[targetIdx].origin, callingStops[0].name, sizeof(xStation->service[targetIdx].origin));
         for (int i=matchIdx+1; i<numCallingStops; i++) {
             // "Stop name (HH:MM)" - matches the UK rail board's calling-point format
             char entry[MAXLOCATIONSIZE+10];
             if (!omitCallingTimes && callingStops[i].time[0]) sprintf(entry,"%s (%s)",callingStops[i].name,callingStops[i].time);
             else strlcpy(entry,callingStops[i].name,sizeof(entry));
 
-            size_t curLen = strlen(xStation->service[0].calling);
+            size_t curLen = strlen(xStation->service[targetIdx].calling);
             size_t addLen = strlen(entry) + (curLen ? 2 : 0);
-            if (curLen + addLen >= sizeof(xStation->service[0].calling)) break;
-            if (curLen) strcat(xStation->service[0].calling, ", ");
-            strcat(xStation->service[0].calling, entry);
+            if (curLen + addLen >= sizeof(xStation->service[targetIdx].calling)) break;
+            if (curLen) strcat(xStation->service[targetIdx].calling, ", ");
+            strcat(xStation->service[targetIdx].calling, entry);
         }
     }
 
@@ -691,6 +716,13 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         station->callingKnown = callingFetchKnown;
     } else {
         station->callingKnown = false;
+    }
+    if (xStation->numServices>1) {
+        strlcpy(station->nextCalling, xStation->service[1].calling, sizeof(station->nextCalling));
+        strlcpy(station->nextOrigin, xStation->service[1].origin, sizeof(station->nextOrigin));
+        station->nextCallingKnown = nextCallingFetchKnown;
+    } else {
+        station->nextCallingKnown = false;
     }
 }
 

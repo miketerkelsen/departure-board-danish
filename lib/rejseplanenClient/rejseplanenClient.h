@@ -112,12 +112,13 @@ class rejseplanenClient: public JsonListenerGS {
         // journeyDetail (calling points) state
         rjStopEntry callingStops[40];
         int numCallingStops = 0;
-        // Whether calling-at info for the current primary service is actually known this cycle -
-        // either just freshly fetched, or validly reused from a previous fetch (the samePrimaryService
-        // fast path). False when it was never attempted, still in flight, or the last attempt failed -
-        // read by loadDepartures() to set rdStation::callingKnown (see its own comment for why this
-        // matters).
+        // Whether calling-at info is actually known this cycle for xStation->service[0] / [1]
+        // respectively - either just freshly fetched, or validly reused from a previous fetch. False
+        // when it was never attempted, still in flight, or the last attempt failed - read by
+        // loadDepartures() to set rdStation::callingKnown / nextCallingKnown (see their own comments
+        // for why this distinction matters).
         bool callingFetchKnown = false;
+        bool nextCallingFetchKnown = false;
 
         static bool compareTimes(const rdiService& a, const rdiService& b);
         void resetRawRecord();
@@ -125,7 +126,9 @@ class rejseplanenClient: public JsonListenerGS {
         void finaliseCallingStop();
         void convertDanishToLatin1(char* input, size_t maxLen);
         void buildCurrentPath(const char* key);
-        int getServiceDetails(const char *ref, const char *accessId, const char *stopId);
+        // targetIdx selects which xStation->service[] slot to populate (calling/origin) - 0 for the
+        // primary service, 1 for the pre-fetch of whatever's next in line (see rdStation::nextCalling).
+        int getServiceDetails(const char *ref, const char *accessId, const char *stopId, int targetIdx);
 
         virtual void whitespace(char c);
         virtual void startDocument();

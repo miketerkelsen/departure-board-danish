@@ -73,6 +73,16 @@ struct rdService {
     // origin from a failed or not-yet-completed fetch looked identical to a real origin service with
     // nothing to show, so the board displayed "starts here" as if it knew that, when it didn't.
     bool callingKnown;
+    // Calling-at for whichever service is currently in position [1] (the "next" departure),
+    // pre-fetched ahead of time so that when the current primary departs and this one is promoted
+    // into position [0], its calling-at is usually already known instead of racing a fresh fetch
+    // against the short departed-train animation window. Doesn't increase the steady-state fetch
+    // rate - every service that ever becomes primary already sat in position [1] first, so this is
+    // the same one fetch per service, just happening a cycle earlier. See fetchDepartures() and the
+    // promotion code in the main sketch for how this is kept fresh and consumed.
+    char nextCalling[MAXCALLINGSIZE];
+    char nextOrigin[MAXLOCATIONSIZE];
+    bool nextCallingKnown;
     char serviceMessage[MAXMESSAGESIZE];  // Only store the service message for the first service returned
     rdService service[MAXBOARDSERVICES];
   };

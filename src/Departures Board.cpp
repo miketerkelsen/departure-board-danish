@@ -2418,9 +2418,17 @@ void updateRailDepartures() {
     // now - same reasoning as the departed-train animation's own promotion (see there). callingKnown
     // must be cleared too, so drawStationBoard() shows neither the (now-wrong) calling-at text nor a
     // false "starts here" - it genuinely doesn't know either way yet for whatever's primary now.
+    // nextCalling/nextCallingKnown are invalidated too - loadDepartures() (above) had already
+    // populated them fresh for whatever was in position [1] at fetch time, but the drop above may
+    // have shifted the array since, so they no longer reliably describe the current position [1]
+    // either. This is a rare path (Rejseplanen re-returning an already-animated repeat), so simplicity
+    // wins over trying to salvage the pre-fetch here - the next cycle will just re-pre-fetch normally.
     station.calling[0] = '\0';
     station.origin[0] = '\0';
     station.callingKnown = false;
+    station.nextCalling[0] = '\0';
+    station.nextOrigin[0] = '\0';
+    station.nextCallingKnown = false;
   }
   lastDataLoadTime = millis();
   noDataLoaded = false;
@@ -3379,18 +3387,24 @@ void departureBoardLoop() {
       // nothing. Locally shift the list down one slot instead of waiting on the network, same as
       // Rejseplanen/National Rail will themselves do on the next real fetch.
       promoteNextService();
-      // station.calling/origin describe whichever service was primary as of the LAST real fetch -
-      // that's still the train that just departed, since this promotion was entirely local (no fetch
-      // involved). Clearing them here is what lets rejseplanenClient's "primary unchanged, reuse
-      // cached calling-at" fast path (see fetchDepartures()) tell the difference between "genuinely
-      // still the same service as last fetch" and "same service I only just promoted to locally,
-      // whose calling-at was never actually fetched" - without this, the first fetch after a
-      // promotion could wrongly carry the departed service's stops forward onto the new primary.
-      // callingKnown also goes false here - the new primary's calling-at is genuinely unknown until
-      // a fetch actually succeeds for it, not "known to have none" (see its own comment).
-      station.calling[0] = '\0';
-      station.origin[0] = '\0';
-      station.callingKnown = false;
+      // Whatever's now primary was sitting in position [1] a moment ago, and rejseplanenClient
+      // pre-fetches calling-at for that position ahead of time precisely for this moment (see
+      // rdStation::nextCalling and fetchDepartures()) - if it landed in time, use it immediately
+      // instead of clearing and waiting on a fresh fetch. nextCalling/nextOrigin describe whatever
+      // WAS in position [1] either way, so they get consumed (or discarded, if not known) and reset
+      // here regardless - position [1] now holds something different that hasn't been pre-fetched yet.
+      if (station.nextCallingKnown) {
+        strlcpy(station.calling, station.nextCalling, sizeof(station.calling));
+        strlcpy(station.origin, station.nextOrigin, sizeof(station.origin));
+        station.callingKnown = true;
+      } else {
+        station.calling[0] = '\0';
+        station.origin[0] = '\0';
+        station.callingKnown = false;
+      }
+      station.nextCalling[0] = '\0';
+      station.nextOrigin[0] = '\0';
+      station.nextCallingKnown = false;
       // If whatever's now primary ALSO already passed its own departed-threshold, it left too close
       // behind the one that just animated away to be worth a separate animation of its own - S-tog
       // in particular can run services only moments apart during busy periods. Keep silently
@@ -3410,6 +3424,12 @@ void departureBoardLoop() {
         snprintf(fingerprint2,sizeof(fingerprint2),"%s|%s",station.service[0].sTime,station.service[0].destination);
         strlcpy(trainDepartedFingerprint,fingerprint2,sizeof(trainDepartedFingerprint));
         promoteNextService();
+        // Whatever calling-at was just consumed/discarded above described the service this loop just
+        // skipped past, not whichever one it lands on next - invalidate it each time round so a
+        // multi-departure cluster can never show a skipped train's stale stops.
+        station.calling[0] = '\0';
+        station.origin[0] = '\0';
+        station.callingKnown = false;
       }
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
@@ -3426,12 +3446,14 @@ void departureBoardLoop() {
       // iteration instead of waiting out whatever was left of its normal multi-second interval.
       if (noScrolling && station.numServices>1) drawServiceLine(1,LINE2);
       if (!isScrollingService) serviceTimer = millis();
-      // Calling-at points are only ever fetched for whichever service is primary at fetch time, so
-      // the promoted service's own calling-at list doesn't exist locally yet - the message line
-      // stays cleared (see above) until a fetch lands. Rather than leaving that to the next
-      // regularly scheduled refresh (up to apiRefreshRate away), force one now so the gap is just
-      // however long the fetch itself takes.
-      nextDataUpdate = millis();
+      // If the pre-fetch above didn't land in time, the promoted service's calling-at list still
+      // doesn't exist locally - rather than leaving that to the next regularly scheduled refresh (up
+      // to apiRefreshRate away), force one now so the gap is just however long the fetch itself
+      // takes. But if the pre-fetch DID land, there's no urgency - letting the natural schedule
+      // apply here (instead of an urgent fetch immediately after every single departure) means fewer
+      // fetch attempts get bunched up right after the display was just busy animating, which was the
+      // most likely reason S-tog - departing far more often than Tog - saw fetches fail more often.
+      if (!station.callingKnown) nextDataUpdate = millis();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
