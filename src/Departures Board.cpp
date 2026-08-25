@@ -2432,6 +2432,16 @@ void updateRailDepartures() {
     station.nextCalling[0] = '\0';
     station.nextOrigin[0] = '\0';
     station.nextCallingKnown = false;
+    // Without this, the board sits on a blank calling-at line until the next REGULARLY scheduled
+    // fetch (up to apiRefreshRate away) - and since the promotion code now always forces an
+    // immediate refetch right after a departure (see its own comment for why), that refetch is
+    // exactly what's likely to land here: querying Rejseplanen again so soon after a departure
+    // that its own board still hasn't retired the just-departed service is precisely the situation
+    // this whole function exists to catch. For S-tog specifically, with departures close enough
+    // together that the next one can arrive before this catches up, that could otherwise mean the
+    // line never gets a real chance to fill in at all - always dropping a repeat, never getting far
+    // enough to actually fetch the calling points for whichever service is genuinely primary now.
+    nextDataUpdate = millis();
   }
   lastDataLoadTime = millis();
   noDataLoaded = false;
