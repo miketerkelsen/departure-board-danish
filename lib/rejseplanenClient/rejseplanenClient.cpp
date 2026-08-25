@@ -500,13 +500,10 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     } else if (fetchCallingPoints && xStation->numServices && xStation->service[0].serviceID[0]) {
         // The overall board fetch above already succeeded (that's how we got here), so this being
         // slow/failing shouldn't fail the whole board - the board just displays with a blank
-        // calling-at line until it succeeds. But that used to be entirely silent, with nothing
-        // recording it even happened - note it in lastResultMessage so it's visible via /info
-        // instead of just quietly not showing calling-at points with no way to tell why.
-        int callingResult = getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
-        if (callingResult != UPD_SUCCESS) {
-            sprintf(js->lastResultMessage+strlen(js->lastResultMessage)," [calling-at fetch failed: %d]",callingResult);
-        }
+        // calling-at line until it succeeds. getServiceDetails() logs its own compact timing/result
+        // into js->lastResultMessage regardless of outcome, so a failure here is visible via /info
+        // instead of being entirely silent.
+        getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
     }
 
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
@@ -519,6 +516,14 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
 // "Stopper ved: ..." list for whatever stops remain after the requested stop.
 //
 int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, const char *stopId) {
+    // Live-tested this against the real API: response sizes (18-34KB) and this machine's own
+    // transfer time (<0.3s) didn't point at either being the bottleneck on their own, which means
+    // whatever's actually slow is specific to the ESP32's own connect/TLS/parse path - something
+    // that can't be measured from here. Timing each phase and surfacing it via /info (js-
+    // >lastResultMessage) means the NEXT check has real numbers from the actual hardware instead of
+    // another guess. Kept deliberately compact (js->lastResultMessage is only 80 bytes and the
+    // caller in fetchDepartures() appends its own summary after this).
+    unsigned long tStart = millis();
 
     WiFiClientSecure httpsClient;
     httpsClient.setInsecure();
@@ -531,7 +536,11 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
         delay(100);
         retryCounter++;
     }
-    if (retryCounter>=10) return UPD_NO_RESPONSE;
+    if (retryCounter>=10) {
+        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn-fail %lums ",millis()-tStart);
+        return UPD_NO_RESPONSE;
+    }
+    unsigned long tConnected = millis();
 
     // URL-encode the ref token (it's built from #, |, spaces and digits/letters only)
     String encodedRef;
@@ -554,6 +563,7 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
         retryCounter++;
         if (retryCounter>=80) {
             httpsClient.stop();
+            sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn%lu resp-fail %lums ",tConnected-tStart,millis()-tStart);
             return UPD_TIMEOUT;
         }
     }
@@ -561,6 +571,7 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     String statusLine = httpsClient.readStringUntil('\n');
     if (!statusLine.startsWith("HTTP/") || statusLine.indexOf("200 OK") == -1) {
         httpsClient.stop();
+        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn%lu http-err %lums ",tConnected-tStart,millis()-tStart);
         return UPD_HTTP_ERROR;
     }
     unsigned long dataSendTimeout = millis() + 1000UL;
@@ -569,12 +580,14 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
         if (line == "\r") break;
         delay(1);
     }
+    unsigned long tHeaders = millis();
 
     JsonStreamingParserGS parser;
     parser.setListener(this);
     parser.reset();
     fetchingDepartures = false;
 
+    long bytesReceived = 0;
     uint8_t chunk[512];
     // S-tog stops at every local station, so its journeyDetail responses run far larger than a
     // typical intercity Tog service's (a real København H S-tog journey measured here came to
@@ -584,20 +597,29 @@ int rejseplanenClient::getServiceDetails(const char *ref, const char *accessId, 
     // the actual reason this didn't reliably fit the old 12s window. Reading in chunks instead cuts
     // that network-call overhead by ~500x (the parser itself is still fed byte-by-byte - it's a
     // streaming state machine, that part is inherent) - genuinely faster, not just given more time
-    // to be slow. 25s (raised from 12s) stays as a sane worst-case ceiling on top of that.
-    dataSendTimeout = millis() + 25000UL;
+    // to be slow. Response size/transfer time tested fine from a normal connection (18-34KB,
+    // <0.3s), so whatever's actually slow is specific to the ESP32's own connect/parse path -
+    // raising this further to 35s as a safe hedge while the new timing log above (js-
+    // >lastResultMessage, see /info) gathers real numbers from the actual hardware.
+    dataSendTimeout = millis() + 35000UL;
     while ((httpsClient.available() || httpsClient.connected()) && (millis() < dataSendTimeout)) {
         int avail = httpsClient.available();
         if (avail > 0) {
             int n = httpsClient.read(chunk, avail > (int)sizeof(chunk) ? (int)sizeof(chunk) : avail);
             for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
+            bytesReceived += n;
         } else {
             delay(5);
         }
     }
     httpsClient.stop();
+    unsigned long tDone = millis();
 
-    if (millis() >= dataSendTimeout || numCallingStops == 0) return UPD_TIMEOUT;
+    if (millis() >= dataSendTimeout || numCallingStops == 0) {
+        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:c%luh%lup%lu B%ld stops%d TIMEOUT ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived,numCallingStops);
+        return UPD_TIMEOUT;
+    }
+    sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:c%luh%lup%lu B%ld ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived);
 
     // Find the requested stop in the route, and build the "calling at" list from what follows it
     int matchIdx = -1;
