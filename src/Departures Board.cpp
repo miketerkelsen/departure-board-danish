@@ -348,7 +348,7 @@ static char weatherMsg[MAXWEATHERSIZE];
 // Bit and bobs
 static unsigned long timer = 0;
 static bool isSleeping = false;            // Is the screen sleeping (showing the "screensaver")
-static bool sleepEnabled = false;          // Is overnight sleep enabled?
+static bool sleepEnabled = true;           // Is overnight sleep enabled?
 static bool forcedSleep = false;           // Is the system in manual sleep mode?
 static bool forcedAwake = false;           // Was the system woken by touch sensor?
 static int stayAwakeSeconds = 300;         // How long to force stay awake since last tap
@@ -366,7 +366,7 @@ static bool dateEnabled = true;            // Showing the date on screen?
 static bool weatherEnabled = false;        // Showing weather at station location. Requires an OpenWeatherMap API key.
 static bool firmwareUpdates = true;        // Check for and install firmware updates automatically at boot?
 static bool dailyUpdateCheck = false;      // Check for and install firmware updates at midnight?
-static byte sleepStarts = 0;               // Hour at which the overnight sleep (screensaver) begins
+static byte sleepStarts = 23;              // Hour at which the overnight sleep (screensaver) begins
 static byte sleepEnds = 6;                 // Hour at which the overnight sleep (screensaver) ends
 static int brightness = 50;                // Initial brightness level of the OLED screen
 static unsigned long lastWiFiReconnect=0;  // Last WiFi reconnection time (millis)
@@ -1438,7 +1438,7 @@ void saveFirmwareInfo() {
 
 // Write a default config file so that the Web GUI works initially
 void writeDefaultConfig() {
-  String defaultConfig = "{\"lat\":0,\"lon\":0,\"weather\":true,\"sleep\":false,\"showDate\":true,\"update\":true,\"sleepStarts\":23,\"sleepEnds\":8,\"brightness\":20,\"mode\":3}"; // mode 3 = MODE_DKRAIL ("Tog")
+  String defaultConfig = "{\"lat\":0,\"lon\":0,\"weather\":true,\"sleep\":true,\"showDate\":true,\"update\":true,\"sleepStarts\":23,\"sleepEnds\":6,\"brightness\":20,\"mode\":3}"; // mode 3 = MODE_DKRAIL ("Tog")
   saveFile("/config.json",defaultConfig);
   resetLocationIds();
   saveFirmwareInfo();
