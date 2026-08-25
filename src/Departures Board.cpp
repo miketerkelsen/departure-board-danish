@@ -3459,14 +3459,22 @@ void departureBoardLoop() {
       // iteration instead of waiting out whatever was left of its normal multi-second interval.
       if (noScrolling && station.numServices>1) drawServiceLine(1,LINE2);
       if (!isScrollingService) serviceTimer = millis();
-      // If the pre-fetch above didn't land in time, the promoted service's calling-at list still
-      // doesn't exist locally - rather than leaving that to the next regularly scheduled refresh (up
-      // to apiRefreshRate away), force one now so the gap is just however long the fetch itself
-      // takes. But if the pre-fetch DID land, there's no urgency - letting the natural schedule
-      // apply here (instead of an urgent fetch immediately after every single departure) means fewer
-      // fetch attempts get bunched up right after the display was just busy animating, which was the
-      // most likely reason S-tog - departing far more often than Tog - saw fetches fail more often.
-      if (!station.callingKnown) nextDataUpdate = millis();
+      // Always force an immediate fresh fetch after a promotion, whether or not the pre-fetch above
+      // landed in time - matching the older, simpler behaviour from before pre-fetching existed
+      // (2.10 and earlier), which real-hardware A/B testing confirmed was reliably fast even with
+      // none of the later fetch-side optimisations (no connection keep-alive, no chunked reads).
+      // This USED to be conditional ("only if the pre-fetch missed") on the theory that an unconditional
+      // fetch right after every single S-tog departure was itself the reason fetches failed more often
+      // for S-tog - but that reasoning had it backwards: what actually made S-tog's calling-at
+      // unreliable was pre-fetching needing a SECOND sequential calling-at connection nearly every
+      // cycle (S-tog's fast turnover makes the "same service as last cycle" cache check miss far more
+      // than Tog's), each one paying its own handshake, not the frequency of reactive fetches. A
+      // back-to-back departure cluster (see the loop above) also has no pre-fetch coverage at all
+      // beyond position [1], so it always needs this regardless. Cheap now anyway - keep-alive means a
+      // full fetch cycle measures ~2.5s on real hardware, not the multi-handshake cost this was
+      // originally trying to avoid. Pre-fetch is kept as a bonus for the common case where it wins the
+      // race and this fetch's result just confirms what's already showing, not as the only path.
+      nextDataUpdate = millis();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
