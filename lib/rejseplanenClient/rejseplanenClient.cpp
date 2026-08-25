@@ -131,7 +131,9 @@ void rejseplanenClient::finaliseDepartureRecord() {
     convertDanishToLatin1(svc.destination, sizeof(svc.destination));
 
     strlcpy(svc.via, raw.name, sizeof(svc.via));
+    convertDanishToLatin1(svc.via, sizeof(svc.via));
     strlcpy(svc.opco, raw.opco, sizeof(svc.opco));
+    convertDanishToLatin1(svc.opco, sizeof(svc.opco));
     strlcpy(svc.serviceID, raw.ref, sizeof(svc.serviceID));
 
     strlcpy(svc.stopArea, raw.stop, sizeof(svc.stopArea));
