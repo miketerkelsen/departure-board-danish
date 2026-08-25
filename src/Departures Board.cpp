@@ -3308,6 +3308,14 @@ void departureBoardLoop() {
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
       trainDepartedMoveTime = millis() + 1500; // rest in place for 1.5s before sliding off
+      // Discard any fetch that's already sitting completed-but-unconsumed at this point (the block
+      // that would normally apply it is gated on !trainDepartedAnimating, so it's been waiting) -
+      // it was taken before this departure was recognised as departed, so it can still list the
+      // very service we're about to animate away and promote past. Left alone, that stale result
+      // gets applied the instant the animation ends, silently reverting the correct promotion back
+      // to the departed service until the next real fetch (see nextDataUpdate below) lands - which
+      // is exactly the "old departure hangs around for a second or two" symptom this fixes.
+      fetchComplete = false;
       // Clear the calling-at/message scroll line immediately rather than leaving it showing the
       // just-departed service's stops until the next real data fetch rebuilds it (which could be
       // tens of seconds away) - it was also still actively scrolling behind the departed-train
@@ -3357,6 +3365,14 @@ void departureBoardLoop() {
       // regularly scheduled refresh (up to apiRefreshRate away), force one now so the gap is just
       // however long the fetch itself takes.
       nextDataUpdate = millis();
+      // Also discard whatever's completed (or still in flight and about to complete) from before -
+      // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
+      // unconsumed when the animation started; one that was still in flight at that point can finish
+      // at any point during the ~3.5s animation and would otherwise get applied right here, the
+      // instant trainDepartedAnimating goes false - and since it was requested before this departure
+      // was recognised, it can still list the very service just promoted past, silently reverting
+      // this correct promotion back to the departed one until nextDataUpdate's fresh fetch lands.
+      fetchComplete = false;
     }
   }
 
