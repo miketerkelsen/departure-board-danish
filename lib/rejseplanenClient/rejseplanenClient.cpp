@@ -461,7 +461,20 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     if (xStation->numServices != station->numServices) boardChanged = true;
     else if (xStation->numServices && strcmp(xStation->service[0].destination,station->service[0].destination)) boardChanged = true;
 
-    if (fetchCallingPoints && xStation->numServices && xStation->service[0].serviceID[0]) {
+    // The calling-at list only actually changes when the primary service itself changes, but this
+    // used to call getServiceDetails() (a second, full HTTP request) on every single refresh
+    // regardless - doubling the API call count for no benefit on the many cycles where the same
+    // service is still sitting at the top of the board. sTime+destination is the same "is this
+    // really the same departure" fingerprint used elsewhere (trainDepartedFingerprint in the main
+    // sketch) - when it matches, just carry the previous load's calling/origin forward instead of
+    // spending a real call to re-fetch text that hasn't changed.
+    bool samePrimaryService = fetchCallingPoints && xStation->numServices && station->numServices &&
+        strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
+        strcmp(xStation->service[0].destination,station->service[0].destination)==0;
+    if (samePrimaryService) {
+        strlcpy(xStation->service[0].calling, station->calling, sizeof(xStation->service[0].calling));
+        strlcpy(xStation->service[0].origin, station->origin, sizeof(xStation->service[0].origin));
+    } else if (fetchCallingPoints && xStation->numServices && xStation->service[0].serviceID[0]) {
         getServiceDetails(xStation->service[0].serviceID, accessId, stopId);
     }
 
