@@ -135,7 +135,7 @@ At start-up, the ESP32's IP address is displayed. To change the station or to co
 - **Set custom hostname for board** - change the hostname from the default "DeparturesBoard", useful if you're running multiple boards.
 - **Set custom (non-Danish) time zone** - only affects the clock display (see [below](#custom-time-zones) for details).
 - **Suppress calling at / info messages** - turns off all horizontally scrolling text and RSS feeds (much lower functionality but less distracting).
-- **Increase API refresh rate** (Tog/S-tog) - reduces the interval between data refreshes from every 90 seconds to every 45 seconds.
+- **Increase API refresh rate** - reduces the interval between data refreshes from every 90 seconds to every 45 seconds. Applies to all four modes; doubles Rejseplanen API usage, so worth leaving off if you're mindful of your API quota.
 - **Show activity indicator during updates** - displays an icon while the board is communicating with Rejseplanen/weather/RSS.
 - **Display RSS news headlines feed from** - shows the top headlines from the selected feed after other service messages. Use the RSS Feeds Editor to add your own feeds.
 - **Prioritise RSS headlines feed** - displays headlines before other service messages.

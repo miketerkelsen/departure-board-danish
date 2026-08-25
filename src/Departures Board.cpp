@@ -321,9 +321,8 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define ODENSE_ST_ID "8600512"         // see odenseBusLoop() for what this gates
 
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
-#define DATAUPDATEINTERVAL 90000      // How often we fetch data from National Rail (ms - 1.5 mins) - "default" option
-#define FASTDATAUPDATEINTERVAL 45000  // How often we fetch data from National Rail (ms - 45 secs) - "fast" option
-#define BUSDATAUPDATEINTERVAL 45000   // How often we fetch data from bustimes.org (ms - 45 secs)
+#define DATAUPDATEINTERVAL 90000      // How often we fetch departure data (ms - 1.5 mins) - "default" option
+#define FASTDATAUPDATEINTERVAL 45000  // How often we fetch departure data (ms - 45 secs) - "fast" option
 #define RSSUPDATEINTERVAL 600000      // How often to refresh the RSS feed (ms - 10 mins)
 #define WEATHERUPDATEINTERVAL 1200000 // How often to update the weather forecast (ms - 20 mins)
 
@@ -474,7 +473,7 @@ static bool isShowingVia=false;
 // for how "departed" is inferred (there's no such field in the data itself).
 static bool trainDepartedAnimating = false;
 static int trainDepartedXpos = 0;
-static unsigned long trainDepartedMoveTime = 0; // millis() timestamp the icon starts sliding at, after resting in place
+static unsigned long trainDepartedMoveTime = 0; // millis() timestamp the icon starts sliding at (set to the trigger time itself, so it starts immediately)
 static char trainDepartedFingerprint[64] = ""; // identifies the departure that last played the
   // animation (sTime+destination, the closest thing to a stable id this data has), so it only
   // plays once per departure rather than every frame while it lingers as service[0]
@@ -3308,7 +3307,7 @@ void departureBoardLoop() {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
-      trainDepartedMoveTime = millis() + 1500; // rest in place for 1.5s before sliding off
+      trainDepartedMoveTime = millis(); // start sliding immediately, no rest-in-place pause
       // Clear the calling-at/message scroll line immediately rather than leaving it showing the
       // just-departed service's stops until the next real data fetch rebuilds it (which could be
       // tens of seconds away) - it was also still actively scrolling behind the departed-train
@@ -3327,8 +3326,9 @@ void departureBoardLoop() {
     blankArea(0,LINE1-2,256,LINE2-LINE1+2);
     drawTrainIcon(trainDepartedXpos,LINE1+3);
     u8g2.updateDisplayArea(0,1,32,3);
-    // Sits still (redrawn but not moved) until trainDepartedMoveTime, then slides right at ~120px/
-    // sec - half the previous speed - taking about 2 more seconds to clear the screen.
+    // Slides right at ~120px/sec, starting the frame it triggers (no rest-in-place pause - that
+    // used to leave the just-departed service looking "stuck" for a second or two before anything
+    // visibly happened), taking about 2 seconds to clear the screen.
     if (millis() >= trainDepartedMoveTime) trainDepartedXpos += 3;
     if (trainDepartedXpos > SCREEN_WIDTH) {
       trainDepartedAnimating = false;
@@ -3916,7 +3916,7 @@ void fetchDeparturesTask(void *pvParameters) {
             break;
           case MODE_DKBUS:
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,DKBUS_PRODUCTS,false,"",0);
-            nextDataUpdate = millis() + BUSDATAUPDATEINTERVAL;
+            nextDataUpdate = millis()+apiRefreshRate;
             break;
           case MODE_STOG:
             // Own dedicated board - always S-tog-only (no product checkboxes to read), and no

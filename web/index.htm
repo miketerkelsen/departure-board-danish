@@ -529,7 +529,7 @@
                   <div class="py-2">
                     <div class="d-flex justify-content-between align-items-center">
                       <div>
-                        <label class="form-check-label d-block" for="enableFastRefresh">Increase Rail API refresh rate</label>
+                        <label class="form-check-label d-block" for="enableFastRefresh">Increase API refresh rate</label>
                         <div class="small text-body-secondary">Increases from every 90 secs to 45 secs</div>
                       </div>
                       <div class="form-check form-switch mb-0">
@@ -1176,6 +1176,7 @@
       show("optNoScroll", dkrail || letbane || dkbus || stog);
       show("optRssFeed", dkrail || letbane || stog);
       show("optNrTimeOffset", dkrail || stog);
+      show("optFastRefresh", dkrail || letbane || dkbus || stog);
 
       show("optShowTubeLocation", letbane);
 
