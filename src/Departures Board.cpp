@@ -3346,7 +3346,17 @@ void departureBoardLoop() {
     // S-tog runs frequently enough during busy periods that leaving a departed service up for the
     // usual full minute makes the board feel stale - clear it after 15 seconds there instead.
     long departedThresholdSec = useSTogStyle(0) ? -15 : -60;
-    if (deltaSec <= departedThresholdSec && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
+    // A service creeping past the threshold doesn't necessarily mean it's actually departed - a
+    // delay that grows a minute at a time (common) means the LAST fetch's rtTime estimate can go
+    // stale before the next one lands, and the board's clock catching up to that stale estimate
+    // looks identical to a genuine departure. Only trust the threshold crossing when the data behind
+    // it is reasonably fresh; if it's been a while since the last successful load, force one now and
+    // wait for it rather than animating away a train whose delay may have simply grown further in
+    // the meantime - re-evaluated fresh next time this runs, once that fetch lands.
+    bool dataFreshEnoughToTrust = (millis() - lastDataLoadTime) <= 20000UL;
+    if (deltaSec <= departedThresholdSec && !dataFreshEnoughToTrust) {
+      if (millis() < nextDataUpdate) nextDataUpdate = millis();
+    } else if (deltaSec <= departedThresholdSec && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
