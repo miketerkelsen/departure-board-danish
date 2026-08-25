@@ -2387,6 +2387,26 @@ void drawStationBoard() {
 
 void updateRailDepartures() {
   rejseplanenData.loadDepartures(&station,&messages);
+  // Rejseplanen doesn't always retire a service from its own departureBoard response as promptly as
+  // a normal train clears in real life - a cancelled one in particular can keep being returned well
+  // after it already played its departed-train animation here. The fingerprint guard on that
+  // animation correctly stops it firing a second time for the exact same departure, but with nothing
+  // else in place that just meant it sat there looking like a normal, still-upcoming entry instead -
+  // silently drop it again (and anything else sharing its fingerprint) rather than display it.
+  bool droppedRepeat = false;
+  while (station.numServices && trainDepartedFingerprint[0]) {
+    char fp[64];
+    snprintf(fp,sizeof(fp),"%s|%s",station.service[0].sTime,station.service[0].destination);
+    if (strcmp(fp,trainDepartedFingerprint)!=0) break;
+    promoteNextService();
+    droppedRepeat = true;
+  }
+  if (droppedRepeat) {
+    // station.calling/origin still describe the entry just dropped above, not whatever's primary
+    // now - same reasoning as the departed-train animation's own promotion (see there).
+    station.calling[0] = '\0';
+    station.origin[0] = '\0';
+  }
   lastDataLoadTime = millis();
   noDataLoaded = false;
   dataLoadSuccess++;

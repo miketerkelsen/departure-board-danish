@@ -30,7 +30,13 @@ bool rejseplanenClient::compareTimes(const rdiService& a, const rdiService& b) {
         if (hour2 < 2 && hour1 > 20) return true;
         else return hour1 < hour2;
     }
-    return minute1 < minute2;
+    if (minute1 != minute2) return minute1 < minute2;
+    // Two services scheduled in the exact same minute (common on a busy S-tog board with several
+    // lines converging) tie here, and std::sort isn't guaranteed stable - Rejseplanen doesn't always
+    // return them in the same relative order between one fetch and the next either, so without a
+    // deterministic tie-breaker, which one lands in position 0 could flip from fetch to fetch with
+    // nothing actually having changed. Destination name is always present and gives a stable order.
+    return strcmp(a.destination, b.destination) < 0;
 }
 
 // Truncate a Rejseplanen "HH:MM:SS" time string down to "HH:MM" in place.
