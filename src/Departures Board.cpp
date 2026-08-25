@@ -3353,6 +3353,26 @@ void departureBoardLoop() {
       // promotion could wrongly carry the departed service's stops forward onto the new primary.
       station.calling[0] = '\0';
       station.origin[0] = '\0';
+      // If whatever's now primary ALSO already passed its own departed-threshold, it left too close
+      // behind the one that just animated away to be worth a separate animation of its own - S-tog
+      // in particular can run services only moments apart during busy periods. Keep silently
+      // promoting past any more of these back-to-back departures (recording each one's fingerprint
+      // so none of them can trigger their own animation later either) until landing on one that's
+      // still genuinely upcoming, or running out of services - only the first departure in a cluster
+      // like this gets an animation, the rest just quietly drop off the list along with it.
+      while (station.numServices) {
+        const char *effTime2 = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
+        int h2=0,m2=0;
+        sscanf(effTime2,"%d:%d",&h2,&m2);
+        long deltaSec2 = (long)(h2*3600+m2*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+        if (deltaSec2 < -3600) deltaSec2 += 86400;
+        long departedThresholdSec2 = useSTogStyle(0) ? -15 : -60;
+        if (deltaSec2 > departedThresholdSec2) break; // still upcoming - this is the new primary
+        char fingerprint2[64];
+        snprintf(fingerprint2,sizeof(fingerprint2),"%s|%s",station.service[0].sTime,station.service[0].destination);
+        strlcpy(trainDepartedFingerprint,fingerprint2,sizeof(trainDepartedFingerprint));
+        promoteNextService();
+      }
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
         drawPrimaryService(isShowingVia);
