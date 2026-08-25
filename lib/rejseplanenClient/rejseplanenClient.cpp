@@ -468,7 +468,16 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // really the same departure" fingerprint used elsewhere (trainDepartedFingerprint in the main
     // sketch) - when it matches, just carry the previous load's calling/origin forward instead of
     // spending a real call to re-fetch text that hasn't changed.
+    // station->calling is a station-level field ("only the first service returned"), not tied to any
+    // particular service - so it's only trustworthy to reuse when it's known to actually describe
+    // the CURRENT service[0]. The main sketch's departed-train animation promotes the next service
+    // into position 0 locally (no fetch involved) and clears station->calling when it does, precisely
+    // so this check can tell "same primary as last real fetch" apart from "same primary as whatever
+    // was just promoted locally, whose calling-at was never actually fetched" - requiring it non-empty
+    // catches that case and forces a real fetch instead of carrying the departed service's stops
+    // forward onto the one that replaced it.
     bool samePrimaryService = fetchCallingPoints && xStation->numServices && station->numServices &&
+        station->calling[0] &&
         strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
         strcmp(xStation->service[0].destination,station->service[0].destination)==0;
     if (samePrimaryService) {

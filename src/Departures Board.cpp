@@ -3344,6 +3344,15 @@ void departureBoardLoop() {
       // nothing. Locally shift the list down one slot instead of waiting on the network, same as
       // Rejseplanen/National Rail will themselves do on the next real fetch.
       promoteNextService();
+      // station.calling/origin describe whichever service was primary as of the LAST real fetch -
+      // that's still the train that just departed, since this promotion was entirely local (no fetch
+      // involved). Clearing them here is what lets rejseplanenClient's "primary unchanged, reuse
+      // cached calling-at" fast path (see fetchDepartures()) tell the difference between "genuinely
+      // still the same service as last fetch" and "same service I only just promoted to locally,
+      // whose calling-at was never actually fetched" - without this, the first fetch after a
+      // promotion could wrongly carry the departed service's stops forward onto the new primary.
+      station.calling[0] = '\0';
+      station.origin[0] = '\0';
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
         drawPrimaryService(isShowingVia);
