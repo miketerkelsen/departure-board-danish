@@ -3342,6 +3342,12 @@ void departureBoardLoop() {
         drawPrimaryService(isShowingVia);
         u8g2.updateDisplayArea(0,1,32,3);
       }
+      // Calling-at points are only ever fetched for whichever service is primary at fetch time, so
+      // the promoted service's own calling-at list doesn't exist locally yet - the message line
+      // stays cleared (see above) until a fetch lands. Rather than leaving that to the next
+      // regularly scheduled refresh (up to apiRefreshRate away), force one now so the gap is just
+      // however long the fetch itself takes.
+      nextDataUpdate = millis();
     }
   }
 
