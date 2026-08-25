@@ -894,9 +894,17 @@ void progressBar(const char *text, int percent) {
   drawProgressBar(percent);
 }
 
+// Minor is always shown as two digits (2.01, 2.02, ... 2.10, ...) rather than a bare integer, so a
+// small fix bumps the number by a small-looking step instead of jumping straight from 2.0 to 2.1.
+String firmwareVersionString() {
+  char buf[8];
+  sprintf(buf,"%d.%02d",VERSION_MAJOR,VERSION_MINOR);
+  return String(buf);
+}
+
 void drawFirmware() {
   char firmware[16];
-  sprintf(firmware,"v%d.%d",VERSION_MAJOR,VERSION_MINOR);
+  sprintf(firmware,"v%s",firmwareVersionString().c_str());
    u8g2.drawStr(0,53,firmware);
 }
 
@@ -1340,7 +1348,7 @@ void checkPostWebUpgrade() {
   }
 
   if (prevFirmware[0]) {
-    sprintf(currentFirmware,"%d.%d",VERSION_MAJOR,VERSION_MINOR);
+    firmwareVersionString().toCharArray(currentFirmware,sizeof(currentFirmware));
     if (strcmp(prevFirmware,currentFirmware)) {
       // clean up old/dev files - still relevant for any board upgrading from a pre-2.0 release that
       // stored its web UI as loose files rather than embedded in the firmware image
@@ -1424,7 +1432,7 @@ void resetLocationIds() {
 }
 
 void saveFirmwareInfo() {
-  String fw = "{\"fw\":\"" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + "\"}";
+  String fw = "{\"fw\":\"" + firmwareVersionString() + "\"}";
   saveFile("/fw.json",fw);
 }
 
@@ -2294,11 +2302,15 @@ void drawStationBoard() {
       drawPrimaryService(false);
       if (station.service[0].via[0]) viaTimer=millis()+4000;
       if (station.service[0].isCancelled) {
-        // This train is cancelled
+        // This train is cancelled - there's no calling-at list for it, so show Rejseplanen's own
+        // reason if it gave one, otherwise a generic cancellation notice rather than leaving this
+        // line blank.
         if (station.serviceMessage[0]) {
           strcpy(line2[0],station.serviceMessage);
-          numMessages=1;
+        } else {
+          strcpy(line2[0],"Denne afgang er aflyst. Se sk\xE6rmene for yderligere info.");
         }
+        numMessages=1;
       } else {
         // The train is not cancelled
         if (station.service[0].isDelayed && station.serviceMessage[0]) {
@@ -2846,7 +2858,7 @@ void handleInfo(AsyncWebServerRequest *request) {
 
   sprintf(sysUptime,"%d days, %d hrs, %d min", days,hours,minutes);
 
-  String message = "Free Heap: " + String(ESP.getFreeHeap()) + "\nMin Heap: " + String(ESP.getMinFreeHeap()) + "\nLargest free block: " + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) + "\nHostname: " + String(hostname) + "\nFirmware version: v" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + " " + getBuildTime() + "\nSystem uptime: " + String(sysUptime) + "\nFree LittleFS space: " + String(LittleFS.totalBytes() - LittleFS.usedBytes());
+  String message = "Free Heap: " + String(ESP.getFreeHeap()) + "\nMin Heap: " + String(ESP.getMinFreeHeap()) + "\nLargest free block: " + String(heap_caps_get_largest_free_block(MALLOC_CAP_8BIT)) + "\nHostname: " + String(hostname) + "\nFirmware version: v" + firmwareVersionString() + " " + getBuildTime() + "\nSystem uptime: " + String(sysUptime) + "\nFree LittleFS space: " + String(LittleFS.totalBytes() - LittleFS.usedBytes());
   message+="\nCore Plaform: " + String(ESP.getCoreVersion()) + "\nCPU speed: " + String(ESP.getCpuFreqMHz()) + "MHz\nCPU Temperature: " + String(temperatureRead()) + "\nWiFi network: " + String(WiFi.SSID()) + "\nWiFi signal strength: " + String(WiFi.RSSI()) + "dB";
 
   sprintf(sysUptime,"%02d:%02d:%02d %02d/%02d/%04d",timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec,timeinfo.tm_mday,timeinfo.tm_mon+1,timeinfo.tm_year+1900);
@@ -2889,7 +2901,7 @@ void handleRoot(AsyncWebServerRequest *request) {
 
 // Send the firmware version to the client (called from index.htm)
 void handleFirmwareInfo(AsyncWebServerRequest *request) {
-  String response = "{\"firmware\":\"" + String(VERSION_MAJOR) + "." + String(VERSION_MINOR) + "\"}";
+  String response = "{\"firmware\":\"" + firmwareVersionString() + "\"}";
   request->send(200,contentTypeJson,response);
 }
 
@@ -3133,7 +3145,7 @@ void departureBoardLoop() {
     }
   }
 
-  if (millis()>timer && numMessages && !isScrollingStops && !isSleeping && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !noScrolling && !noDataLoaded) {
+  if (millis()>timer && numMessages && !isScrollingStops && !isSleeping && !trainDepartedAnimating && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !noScrolling && !noDataLoaded) {
     // Need to start a new scrolling messages line
     prevMessage = currentMessage;
     prevScrollStopsLength = scrollStopsLength;
@@ -3182,7 +3194,7 @@ void departureBoardLoop() {
     }
   }
 
-  if (isScrollingStops && millis()>timer && !isSleeping && !noScrolling) {
+  if (isScrollingStops && millis()>timer && !isSleeping && !noScrolling && !trainDepartedAnimating) {
     // Widened 1px on top vs. the base font's own 9px row height, as safety margin: u8g2_font_6x10_tf
     // is a 10px font, and drawMixedStr()'s per-glyph vertical correction (see its own comment) can
     // still place a tall accent glyph a pixel above where the base font's own glyphs ever reach. The
@@ -3276,8 +3288,12 @@ void departureBoardLoop() {
   // passes) before triggering, giving the next real data fetch a bit of a head start - reduces (but
   // doesn't guarantee, see promoteNextService() below) the odds it hasn't caught up yet by the time
   // the animation ends. Only triggers once per departure (trainDepartedFingerprint), not every
-  // frame while a passed time lingers in service[0] waiting for the next fetch to drop it.
-  if (!trainDepartedAnimating && !isSleeping && station.numServices && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR && !station.service[0].isCancelled) {
+  // frame while a passed time lingers in service[0] waiting for the next fetch to drop it. Also
+  // applies to cancelled services now - they used to be excluded here, which meant a cancelled
+  // service just sat at the top of the board indefinitely instead of clearing at its departure time
+  // like every other service. effTime already falls back to sTime for a cancelled service (its etd
+  // is the non-numeric "Aflyst", not a real time), so the same comparison works unchanged.
+  if (!trainDepartedAnimating && !isSleeping && station.numServices && lastUpdateResult!=UPD_UNAUTHORISED && lastUpdateResult!=UPD_DATA_ERROR) {
     const char *effTime = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
     int h=0,m=0;
     sscanf(effTime,"%d:%d",&h,&m);
@@ -3293,6 +3309,15 @@ void departureBoardLoop() {
       trainDepartedAnimating = true;
       trainDepartedXpos = 0;
       trainDepartedMoveTime = millis() + 1500; // rest in place for 1.5s before sliding off
+      // Clear the calling-at/message scroll line immediately rather than leaving it showing the
+      // just-departed service's stops until the next real data fetch rebuilds it (which could be
+      // tens of seconds away) - it was also still actively scrolling behind the departed-train
+      // animation until the two blocks above this one were gated on !trainDepartedAnimating.
+      numMessages = 0;
+      currentMessage = 0;
+      isScrollingStops = false;
+      isShowingCalling = false;
+      blankArea(msgMargin,msgLine-1,msgWidth,10);
     }
   }
 
