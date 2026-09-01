@@ -3434,13 +3434,23 @@ void departureBoardLoop() {
       // nothing. Locally shift the list down one slot instead of waiting on the network, same as
       // Rejseplanen/National Rail will themselves do on the next real fetch.
       promoteNextService();
+      // For S-tog, the newly-promoted primary's calling-at is usually already sitting in
+      // rejseplanenClient's persistent line+direction cache (see fetchDepartures()'s
+      // useLineDirCache) from an earlier departure on the same line+direction - a pure local
+      // lookup, no fetch involved, so this can show correct calling-at the INSTANT the promotion
+      // happens, not just "as soon as a fetch lands". Falls through to the older pre-fetch
+      // consumption below on a cache miss (a line+direction never seen before, or right after the
+      // once-a-day cache rebuild) - other modes always fall through, since they don't populate this
+      // cache at all (see MODE_STOG's own fetchDepartures() call for why it's scoped to S-tog only).
+      if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+        station.callingKnown = true;
       // Whatever's now primary was sitting in position [1] a moment ago, and rejseplanenClient
       // pre-fetches calling-at for that position ahead of time precisely for this moment (see
       // rdStation::nextCalling and fetchDepartures()) - if it landed in time, use it immediately
       // instead of clearing and waiting on a fresh fetch. nextCalling/nextOrigin describe whatever
       // WAS in position [1] either way, so they get consumed (or discarded, if not known) and reset
       // here regardless - position [1] now holds something different that hasn't been pre-fetched yet.
-      if (station.nextCallingKnown) {
+      } else if (station.nextCallingKnown) {
         strlcpy(station.calling, station.nextCalling, sizeof(station.calling));
         strlcpy(station.origin, station.nextOrigin, sizeof(station.origin));
         station.callingKnown = true;
@@ -3473,10 +3483,17 @@ void departureBoardLoop() {
         promoteNextService();
         // Whatever calling-at was just consumed/discarded above described the service this loop just
         // skipped past, not whichever one it lands on next - invalidate it each time round so a
-        // multi-departure cluster can never show a skipped train's stale stops.
-        station.calling[0] = '\0';
-        station.origin[0] = '\0';
-        station.callingKnown = false;
+        // multi-departure cluster can never show a skipped train's stale stops. For S-tog, try the
+        // line+direction cache first (same reasoning as the single-promotion case above) before
+        // falling back to blank - a back-to-back cluster is exactly the case that previously had NO
+        // pre-fetch coverage at all beyond position [1], so the cache matters most right here.
+        if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+          station.callingKnown = true;
+        } else {
+          station.calling[0] = '\0';
+          station.origin[0] = '\0';
+          station.callingKnown = false;
+        }
       }
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
@@ -4091,7 +4108,11 @@ void fetchDeparturesTask(void *pvParameters) {
             // Own dedicated board - always S-tog-only (no product checkboxes to read), and no
             // calling-direction filter of its own (that's a DK Rail-only config field) so calling
             // points are fetched unfiltered from whichever service is first.
-            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset);
+            // useLineDirCache=true here only - S-tog's calling points are a property of the
+            // line+direction, confirmed identical across many real trips minutes apart, so once
+            // known for a combo it's reused for every future departure on it with no fetch at all.
+            // See rejseplanenClient.h's LineDirCallingEntry for why this is scoped to S-tog only.
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset,true);
             nextDataUpdate = millis()+apiRefreshRate;
             break;
         }
