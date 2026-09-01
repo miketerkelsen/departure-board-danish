@@ -16,6 +16,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <algorithm>
+#include <new>
 
 rejseplanenClient::rejseplanenClient(rdiStation *station, stnMessages *messages, sharedBufferSpace *sharedBuffer) : xStation(station), xMessages(messages), js(sharedBuffer) {}
 
@@ -426,8 +427,15 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // Lazily allocate the line+direction calling-at cache on the heap the first time it's actually
     // needed (see its own declaration comment for why heap, not a static array) - a board that
     // never uses S-tog mode never pays this ~15KB cost at all.
+    // nothrow: a plain `new[]` aborts the whole program on failure (no exception handler catches it
+    // in this build), which would look exactly like a spontaneous reboot if this ~15KB allocation is
+    // ever attempted when the heap doesn't have a large enough CONTIGUOUS free block available, even
+    // with plenty of total free heap (fragmentation, which this session has already measured
+    // happening under network stress). Every access point already null-checks lineDirCache, so a
+    // failed allocation here just means the cache silently stays off - a graceful degrade instead of
+    // a crash.
     if (useLineDirCache && !lineDirCache) {
-        lineDirCache = new LineDirCallingEntry[MAXLINEDIRCACHE];
+        lineDirCache = new (std::nothrow) LineDirCallingEntry[MAXLINEDIRCACHE];
         lineDirCacheCount = 0;
         lineDirCacheBuiltAt = millis();
     }
