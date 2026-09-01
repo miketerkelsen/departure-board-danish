@@ -323,6 +323,16 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
 #define DATAUPDATEINTERVAL 90000      // How often we fetch departure data (ms - 1.5 mins) - "default" option
 #define FASTDATAUPDATEINTERVAL 45000  // How often we fetch departure data (ms - 45 secs) - "fast" option
+// Cooldown between consecutive dropped-repeat retries (see updateRailDepartures()) - NOT applied to
+// the departure-promotion trigger, which stays immediate/unconditional (confirmed on real hardware
+// to work well on its own). Live-tested: Rejseplanen can take 25-30s to retire an already-departed
+// S-tog service from its own departureBoard response, during which an uncapped immediate-retry loop
+// fired roughly every ~2.5s (measured: 15 fetches in 38s) - ~10-12 full fetch cycles burned on one
+// single departure, visibly fragmenting the heap (largest free block dropped from ~4.8KB to ~3.6KB
+// during the loop, recovering once it stopped). This can't make calling-at appear any faster than
+// Rejseplanen's own server does - that part is out of firmware's control - it only cuts how many
+// wasted attempts get burned waiting for it.
+#define MIN_DROPPED_REPEAT_RETRY_MS 6000UL
 #define RSSUPDATEINTERVAL 600000      // How often to refresh the RSS feed (ms - 10 mins)
 #define WEATHERUPDATEINTERVAL 1200000 // How often to update the weather forecast (ms - 20 mins)
 
@@ -374,6 +384,8 @@ static int prevProgressBarPosition=0;      // Used for progress bar smooth anima
 static int startupProgressPercent;         // Initialisation progress
 static bool wifiConnected = false;         // Connected to WiFi?
 volatile unsigned long nextDataUpdate = 0; // Next National Rail update time (millis)
+// When a dropped-repeat retry last requested a fresh fetch - see MIN_DROPPED_REPEAT_RETRY_MS.
+static unsigned long lastDroppedRepeatRetryTime = 0;
 static int dataLoadSuccess = 0;            // Count of successful data downloads
 static int dataLoadFailure = 0;            // Count of failed data downloads
 static unsigned long lastLoadFailure = 0;  // When the last failure occurred
@@ -2441,7 +2453,19 @@ void updateRailDepartures() {
     // together that the next one can arrive before this catches up, that could otherwise mean the
     // line never gets a real chance to fill in at all - always dropping a repeat, never getting far
     // enough to actually fetch the calling points for whichever service is genuinely primary now.
-    nextDataUpdate = millis();
+    // Bounded by MIN_DROPPED_REPEAT_RETRY_MS rather than firing every single time this triggers -
+    // live-tested proof this needs it: Rejseplanen can take 25-30s to retire a departed S-tog
+    // service, during which an unbounded version of this fired every ~2.5s (a full fetch cycle),
+    // burning ~10-12 wasted attempts on one departure and visibly fragmenting the heap. This can't
+    // make Rejseplanen itself respond faster, only stop hammering it while waiting - so it's still
+    // allowed to retry, just not on literally every single completed fetch.
+    if (millis() - lastDroppedRepeatRetryTime >= MIN_DROPPED_REPEAT_RETRY_MS) {
+      nextDataUpdate = millis();
+    } else {
+      unsigned long earliestRetry = lastDroppedRepeatRetryTime + MIN_DROPPED_REPEAT_RETRY_MS;
+      if (nextDataUpdate > earliestRetry) nextDataUpdate = earliestRetry;
+    }
+    lastDroppedRepeatRetryTime = millis();
   }
   lastDataLoadTime = millis();
   noDataLoaded = false;
