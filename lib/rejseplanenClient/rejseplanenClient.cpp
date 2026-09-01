@@ -17,6 +17,7 @@
 #include <cstdlib>
 #include <algorithm>
 #include <new>
+#include <esp_heap_caps.h>
 
 rejseplanenClient::rejseplanenClient(rdiStation *station, stnMessages *messages, sharedBufferSpace *sharedBuffer) : xStation(station), xMessages(messages), js(sharedBuffer) {}
 
@@ -424,6 +425,14 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     bool bChunked = false;
     js->lastResultMessage[0] = '\0';
 
+    // See MIN_SAFE_HEAP_FOR_FETCH's own comment - refuse to open a new TLS connection at all while
+    // the heap is already too fragmented to safely support one. Checked before anything else in this
+    // function, including the cache allocation below, on the same reasoning.
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) {
+        strcpy(js->lastResultMessage,"Error: Heap too fragmented, skipping cycle");
+        return UPD_NO_RESPONSE;
+    }
+
     // Lazily allocate the line+direction calling-at cache on the heap the first time it's actually
     // needed (see its own declaration comment for why heap+nothrow, not a static array) - a board
     // that never uses S-tog mode never pays this ~15KB cost at all.
@@ -678,6 +687,13 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     // it timed out, or - for the position-1 pre-fetch - the position-0 call above already used and
     // released it): this makes reuse a pure bonus, never a new failure mode of its own.
     if (!httpsClient.connected()) {
+        // See MIN_SAFE_HEAP_FOR_FETCH's own comment - same guard as fetchDepartures(), only reached
+        // here when there's no already-open connection to reuse (so this would otherwise be a fresh
+        // TLS handshake, the expensive part).
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) {
+            strcpy(js->lastResultMessage,"Error: Heap too fragmented, skipping cycle");
+            return UPD_NO_RESPONSE;
+        }
         httpsClient.setInsecure();
         httpsClient.setTimeout(8000);
         httpsClient.setConnectionTimeout(8000);
@@ -888,6 +904,10 @@ String rejseplanenClient::searchStops(const char *query, const char *accessId, i
     stopSearchMax = maxResults;
     stopSearchName[0] = '\0';
     stopSearchExtId[0] = '\0';
+
+    // See MIN_SAFE_HEAP_FOR_FETCH's own comment. Lower stakes here (user-triggered from the web
+    // config, not a repeating background task), but no reason to risk it either.
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) return "[]";
 
     WiFiClientSecure httpsClient;
     httpsClient.setInsecure();

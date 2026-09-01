@@ -25,6 +25,21 @@
 // Departures Board.cpp's useSTogStyle()) and the shortened "Stopper ved" list below.
 #define RJ_KBH_H_STOP_ID "8600626"
 
+// Floor on heap_caps_get_largest_free_block() below which fetchDepartures()/getServiceDetails()/
+// searchStops() skip opening a new HTTPS connection entirely, rather than attempt one. Live-caught
+// evidence: a board crashed and rebooted after ~25 minutes of sustained "GET timed out" failures
+// against an unresponsive Rejseplanen - largest free block measured at 1588 bytes right before the
+// crash, back to ~35-38KB immediately after reboot. Each failing cycle still completes a full TLS
+// handshake (connect() succeeds; only the response itself times out) before tearing down, and that
+// repeated handshake/teardown churn is a known ESP32/mbedTLS source of heap fragmentation. Below this
+// floor, allocations elsewhere in that stack (WiFiClientSecure/mbedTLS buffers, Strings) are NOT
+// nothrow-guarded like the line+direction cache is, so a failure there aborts the whole program -
+// indistinguishable from a spontaneous reboot. Skipping the attempt caps how much worse a
+// fragmentation spiral can get; the cost is one skipped fetch cycle (existing display data is left
+// exactly as any other failed cycle would leave it). Set comfortably below every healthy reading seen
+// this session (34-38KB+) so this never fires under normal conditions.
+#define MIN_SAFE_HEAP_FOR_FETCH 20000
+
 class rejseplanenClient: public JsonListenerGS {
 
     private:
