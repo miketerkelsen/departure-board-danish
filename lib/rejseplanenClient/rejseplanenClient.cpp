@@ -582,8 +582,13 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // regardless of whether THIS EXACT trip was also primary last cycle, and covers the much more
     // common case for S-tog (a brand new trip, never seen as primary before, but on a line+direction
     // already known from an earlier departure) that the check below can never catch on its own.
+    // NOT gated on !useLineDirCache - the line+direction cache being empty or failing to populate
+    // (e.g. under poor network conditions, where every real fetch attempt is timing out) must not
+    // disable this proven fallback too. Losing BOTH at once was a real bug: it left S-tog forced to
+    // attempt (and time out on) a brand new fetch every single cycle, even on cycles where the exact
+    // same service was still primary and this check would have reused its calling-at for free.
     int lineDirIdx = useLineDirCache && xStation->numServices ? findLineDirCacheEntry(xStation->service[0].via, xStation->service[0].destination) : -1;
-    bool samePrimaryService = !useLineDirCache && fetchCallingPoints && xStation->numServices && station->numServices &&
+    bool samePrimaryService = fetchCallingPoints && xStation->numServices && station->numServices &&
         station->callingKnown &&
         strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
         strcmp(xStation->service[0].destination,station->service[0].destination)==0 &&
@@ -623,8 +628,9 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         // Same line+direction-cache-first priority as position [0] above - see its own comment.
         int lineDirIdx1 = useLineDirCache ? findLineDirCacheEntry(xStation->service[1].via, xStation->service[1].destination) : -1;
         // serviceID included here for the same reason as samePrimaryService above - sTime+
-        // destination alone isn't a reliably unique fingerprint.
-        bool sameNext = !useLineDirCache && station->numServices>1 && station->nextCallingKnown &&
+        // destination alone isn't a reliably unique fingerprint. Not gated on !useLineDirCache -
+        // same reasoning as samePrimaryService above.
+        bool sameNext = station->numServices>1 && station->nextCallingKnown &&
             strcmp(xStation->service[1].sTime,station->service[1].sTime)==0 &&
             strcmp(xStation->service[1].destination,station->service[1].destination)==0 &&
             strcmp(xStation->service[1].serviceID,station->service[1].serviceID)==0;
