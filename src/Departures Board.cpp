@@ -323,16 +323,6 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
 #define DATAUPDATEINTERVAL 90000      // How often we fetch departure data (ms - 1.5 mins) - "default" option
 #define FASTDATAUPDATEINTERVAL 45000  // How often we fetch departure data (ms - 45 secs) - "fast" option
-// Cooldown between consecutive dropped-repeat retries (see updateRailDepartures()) - NOT applied to
-// the departure-promotion trigger, which stays immediate/unconditional (confirmed on real hardware
-// to work well on its own). Live-tested: Rejseplanen can take 25-30s to retire an already-departed
-// S-tog service from its own departureBoard response, during which an uncapped immediate-retry loop
-// fired roughly every ~2.5s (measured: 15 fetches in 38s) - ~10-12 full fetch cycles burned on one
-// single departure, visibly fragmenting the heap (largest free block dropped from ~4.8KB to ~3.6KB
-// during the loop, recovering once it stopped). This can't make calling-at appear any faster than
-// Rejseplanen's own server does - that part is out of firmware's control - it only cuts how many
-// wasted attempts get burned waiting for it.
-#define MIN_DROPPED_REPEAT_RETRY_MS 6000UL
 #define RSSUPDATEINTERVAL 600000      // How often to refresh the RSS feed (ms - 10 mins)
 #define WEATHERUPDATEINTERVAL 1200000 // How often to update the weather forecast (ms - 20 mins)
 
@@ -384,8 +374,6 @@ static int prevProgressBarPosition=0;      // Used for progress bar smooth anima
 static int startupProgressPercent;         // Initialisation progress
 static bool wifiConnected = false;         // Connected to WiFi?
 volatile unsigned long nextDataUpdate = 0; // Next National Rail update time (millis)
-// When a dropped-repeat retry last requested a fresh fetch - see MIN_DROPPED_REPEAT_RETRY_MS.
-static unsigned long lastDroppedRepeatRetryTime = 0;
 static int dataLoadSuccess = 0;            // Count of successful data downloads
 static int dataLoadFailure = 0;            // Count of failed data downloads
 static unsigned long lastLoadFailure = 0;  // When the last failure occurred
@@ -2444,28 +2432,6 @@ void updateRailDepartures() {
     station.nextCalling[0] = '\0';
     station.nextOrigin[0] = '\0';
     station.nextCallingKnown = false;
-    // Without this, the board sits on a blank calling-at line until the next REGULARLY scheduled
-    // fetch (up to apiRefreshRate away) - and since the promotion code now always forces an
-    // immediate refetch right after a departure (see its own comment for why), that refetch is
-    // exactly what's likely to land here: querying Rejseplanen again so soon after a departure
-    // that its own board still hasn't retired the just-departed service is precisely the situation
-    // this whole function exists to catch. For S-tog specifically, with departures close enough
-    // together that the next one can arrive before this catches up, that could otherwise mean the
-    // line never gets a real chance to fill in at all - always dropping a repeat, never getting far
-    // enough to actually fetch the calling points for whichever service is genuinely primary now.
-    // Bounded by MIN_DROPPED_REPEAT_RETRY_MS rather than firing every single time this triggers -
-    // live-tested proof this needs it: Rejseplanen can take 25-30s to retire a departed S-tog
-    // service, during which an unbounded version of this fired every ~2.5s (a full fetch cycle),
-    // burning ~10-12 wasted attempts on one departure and visibly fragmenting the heap. This can't
-    // make Rejseplanen itself respond faster, only stop hammering it while waiting - so it's still
-    // allowed to retry, just not on literally every single completed fetch.
-    if (millis() - lastDroppedRepeatRetryTime >= MIN_DROPPED_REPEAT_RETRY_MS) {
-      nextDataUpdate = millis();
-    } else {
-      unsigned long earliestRetry = lastDroppedRepeatRetryTime + MIN_DROPPED_REPEAT_RETRY_MS;
-      if (nextDataUpdate > earliestRetry) nextDataUpdate = earliestRetry;
-    }
-    lastDroppedRepeatRetryTime = millis();
   }
   lastDataLoadTime = millis();
   noDataLoaded = false;
@@ -3434,23 +3400,13 @@ void departureBoardLoop() {
       // nothing. Locally shift the list down one slot instead of waiting on the network, same as
       // Rejseplanen/National Rail will themselves do on the next real fetch.
       promoteNextService();
-      // For S-tog, the newly-promoted primary's calling-at is usually already sitting in
-      // rejseplanenClient's persistent line+direction cache (see fetchDepartures()'s
-      // useLineDirCache) from an earlier departure on the same line+direction - a pure local
-      // lookup, no fetch involved, so this can show correct calling-at the INSTANT the promotion
-      // happens, not just "as soon as a fetch lands". Falls through to the older pre-fetch
-      // consumption below on a cache miss (a line+direction never seen before, or right after the
-      // once-a-day cache rebuild) - other modes always fall through, since they don't populate this
-      // cache at all (see MODE_STOG's own fetchDepartures() call for why it's scoped to S-tog only).
-      if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
-        station.callingKnown = true;
       // Whatever's now primary was sitting in position [1] a moment ago, and rejseplanenClient
       // pre-fetches calling-at for that position ahead of time precisely for this moment (see
       // rdStation::nextCalling and fetchDepartures()) - if it landed in time, use it immediately
       // instead of clearing and waiting on a fresh fetch. nextCalling/nextOrigin describe whatever
       // WAS in position [1] either way, so they get consumed (or discarded, if not known) and reset
       // here regardless - position [1] now holds something different that hasn't been pre-fetched yet.
-      } else if (station.nextCallingKnown) {
+      if (station.nextCallingKnown) {
         strlcpy(station.calling, station.nextCalling, sizeof(station.calling));
         strlcpy(station.origin, station.nextOrigin, sizeof(station.origin));
         station.callingKnown = true;
@@ -3483,17 +3439,10 @@ void departureBoardLoop() {
         promoteNextService();
         // Whatever calling-at was just consumed/discarded above described the service this loop just
         // skipped past, not whichever one it lands on next - invalidate it each time round so a
-        // multi-departure cluster can never show a skipped train's stale stops. For S-tog, try the
-        // line+direction cache first (same reasoning as the single-promotion case above) before
-        // falling back to blank - a back-to-back cluster is exactly the case that previously had NO
-        // pre-fetch coverage at all beyond position [1], so the cache matters most right here.
-        if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
-          station.callingKnown = true;
-        } else {
-          station.calling[0] = '\0';
-          station.origin[0] = '\0';
-          station.callingKnown = false;
-        }
+        // multi-departure cluster can never show a skipped train's stale stops.
+        station.calling[0] = '\0';
+        station.origin[0] = '\0';
+        station.callingKnown = false;
       }
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
@@ -3510,22 +3459,14 @@ void departureBoardLoop() {
       // iteration instead of waiting out whatever was left of its normal multi-second interval.
       if (noScrolling && station.numServices>1) drawServiceLine(1,LINE2);
       if (!isScrollingService) serviceTimer = millis();
-      // Always force an immediate fresh fetch after a promotion, whether or not the pre-fetch above
-      // landed in time - matching the older, simpler behaviour from before pre-fetching existed
-      // (2.10 and earlier), which real-hardware A/B testing confirmed was reliably fast even with
-      // none of the later fetch-side optimisations (no connection keep-alive, no chunked reads).
-      // This USED to be conditional ("only if the pre-fetch missed") on the theory that an unconditional
-      // fetch right after every single S-tog departure was itself the reason fetches failed more often
-      // for S-tog - but that reasoning had it backwards: what actually made S-tog's calling-at
-      // unreliable was pre-fetching needing a SECOND sequential calling-at connection nearly every
-      // cycle (S-tog's fast turnover makes the "same service as last cycle" cache check miss far more
-      // than Tog's), each one paying its own handshake, not the frequency of reactive fetches. A
-      // back-to-back departure cluster (see the loop above) also has no pre-fetch coverage at all
-      // beyond position [1], so it always needs this regardless. Cheap now anyway - keep-alive means a
-      // full fetch cycle measures ~2.5s on real hardware, not the multi-handshake cost this was
-      // originally trying to avoid. Pre-fetch is kept as a bonus for the common case where it wins the
-      // race and this fetch's result just confirms what's already showing, not as the only path.
-      nextDataUpdate = millis();
+      // If the pre-fetch above didn't land in time, the promoted service's calling-at list still
+      // doesn't exist locally - rather than leaving that to the next regularly scheduled refresh (up
+      // to apiRefreshRate away), force one now so the gap is just however long the fetch itself
+      // takes. But if the pre-fetch DID land, there's no urgency - letting the natural schedule
+      // apply here (instead of an urgent fetch immediately after every single departure) means fewer
+      // fetch attempts get bunched up right after the display was just busy animating, which was the
+      // most likely reason S-tog - departing far more often than Tog - saw fetches fail more often.
+      if (!station.callingKnown) nextDataUpdate = millis();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
@@ -4108,11 +4049,7 @@ void fetchDeparturesTask(void *pvParameters) {
             // Own dedicated board - always S-tog-only (no product checkboxes to read), and no
             // calling-direction filter of its own (that's a DK Rail-only config field) so calling
             // points are fetched unfiltered from whichever service is first.
-            // useLineDirCache=true here only - S-tog's calling points are a property of the
-            // line+direction, confirmed identical across many real trips minutes apart, so once
-            // known for a combo it's reused for every future departure on it with no fetch at all.
-            // See rejseplanenClient.h's LineDirCallingEntry for why this is scoped to S-tog only.
-            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset,true);
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset);
             nextDataUpdate = millis()+apiRefreshRate;
             break;
         }
