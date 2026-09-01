@@ -16,8 +16,6 @@
 #include <cctype>
 #include <cstdlib>
 #include <algorithm>
-#include <new>
-#include <esp_heap_caps.h>
 
 rejseplanenClient::rejseplanenClient(rdiStation *station, stnMessages *messages, sharedBufferSpace *sharedBuffer) : xStation(station), xMessages(messages), js(sharedBuffer) {}
 
@@ -419,37 +417,11 @@ long rejseplanenClient::readResponseBody(WiFiClientSecure &client, long contentL
 //
 // Fetches the departure board for a stop and (optionally) the calling points for the first service
 //
-int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache) {
+int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins) {
 
     unsigned long perfTimer = millis();
     bool bChunked = false;
     js->lastResultMessage[0] = '\0';
-
-    // See MIN_SAFE_HEAP_FOR_FETCH's own comment - refuse to open a new TLS connection at all while
-    // the heap is already too fragmented to safely support one. Checked before anything else in this
-    // function, including the cache allocation below, on the same reasoning.
-    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) {
-        strcpy(js->lastResultMessage,"Error: Heap too fragmented, skipping cycle");
-        return UPD_NO_RESPONSE;
-    }
-
-    // Lazily allocate the line+direction calling-at cache on the heap the first time it's actually
-    // needed (see its own declaration comment for why heap+nothrow, not a static array) - a board
-    // that never uses S-tog mode never pays this ~15KB cost at all.
-    if (useLineDirCache && !lineDirCache) {
-        lineDirCache = new (std::nothrow) LineDirCallingEntry[MAXLINEDIRCACHE];
-        lineDirCacheCount = 0;
-        lineDirCacheBuiltAt = millis();
-    }
-    // Rebuild the line+direction calling-at cache from scratch once a day, so a genuine schedule
-    // change eventually gets picked up without needing a reboot - see LineDirCallingEntry's own
-    // comment. lineDirCacheBuiltAt starts at 0 alongside an empty cache, which is already the
-    // correct "just built" state, so this deliberately doesn't fire on the very first fetch after
-    // boot (millis() this soon after boot is always far less than a day).
-    if (useLineDirCache && (millis() - lineDirCacheBuiltAt >= LINEDIRCACHE_MAX_AGE_MS)) {
-        lineDirCacheCount = 0;
-        lineDirCacheBuiltAt = millis();
-    }
 
     xStation->numServices = 0;
     xMessages->numMessages = 0;
@@ -587,23 +559,12 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // make this check stricter (fewer accidental "same service" matches, never more) - the failure
     // mode of getting this wrong was a real one: calling-at text visibly left over from a different,
     // no longer relevant departure.
-    // Line+direction cache checked first (S-tog only, see LineDirCallingEntry) - a hit here is just
-    // as valid regardless of whether THIS EXACT trip was also primary last cycle, and covers the
-    // much more common case for S-tog (a brand new trip, never primary before, but on a
-    // line+direction already known from an earlier departure) that samePrimaryService below can
-    // never catch on its own. NOT mutually exclusive with samePrimaryService - both stay active
-    // together, so losing one (e.g. a cold/rebuilt cache) never costs the other.
-    int lineDirIdx = useLineDirCache && xStation->numServices ? findLineDirCacheEntry(xStation->service[0].via, xStation->service[0].destination) : -1;
     bool samePrimaryService = fetchCallingPoints && xStation->numServices && station->numServices &&
         station->callingKnown &&
         strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
         strcmp(xStation->service[0].destination,station->service[0].destination)==0 &&
         strcmp(xStation->service[0].serviceID,station->service[0].serviceID)==0;
-    if (lineDirIdx >= 0) {
-        strlcpy(xStation->service[0].calling, lineDirCache[lineDirIdx].calling, sizeof(xStation->service[0].calling));
-        strlcpy(xStation->service[0].origin, lineDirCache[lineDirIdx].origin, sizeof(xStation->service[0].origin));
-        callingFetchKnown = true;
-    } else if (samePrimaryService) {
+    if (samePrimaryService) {
         strlcpy(xStation->service[0].calling, station->calling, sizeof(xStation->service[0].calling));
         strlcpy(xStation->service[0].origin, station->origin, sizeof(xStation->service[0].origin));
         callingFetchKnown = true;
@@ -617,7 +578,6 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         // service has no further calling points" apart from "we don't know yet, the fetch failed" -
         // see rdStation::callingKnown's own comment for why that distinction matters.
         callingFetchKnown = (getServiceDetails(httpsClient, xStation->service[0].serviceID, accessId, stopId, 0) == UPD_SUCCESS);
-        if (callingFetchKnown && useLineDirCache) storeLineDirCacheEntry(xStation->service[0].via, xStation->service[0].destination, xStation->service[0].calling, xStation->service[0].origin);
     } else {
         callingFetchKnown = false;
     }
@@ -631,25 +591,18 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     // of urgently right after the promotion that needs it. See rdStation::nextCalling and the
     // promotion code in the main sketch for how this gets consumed.
     if (fetchCallingPoints && xStation->numServices>1) {
-        // Same line+direction-cache-first priority as position [0] above - see its own comment.
-        int lineDirIdx1 = useLineDirCache ? findLineDirCacheEntry(xStation->service[1].via, xStation->service[1].destination) : -1;
         // serviceID included here for the same reason as samePrimaryService above - sTime+
         // destination alone isn't a reliably unique fingerprint.
         bool sameNext = station->numServices>1 && station->nextCallingKnown &&
             strcmp(xStation->service[1].sTime,station->service[1].sTime)==0 &&
             strcmp(xStation->service[1].destination,station->service[1].destination)==0 &&
             strcmp(xStation->service[1].serviceID,station->service[1].serviceID)==0;
-        if (lineDirIdx1 >= 0) {
-            strlcpy(xStation->service[1].calling, lineDirCache[lineDirIdx1].calling, sizeof(xStation->service[1].calling));
-            strlcpy(xStation->service[1].origin, lineDirCache[lineDirIdx1].origin, sizeof(xStation->service[1].origin));
-            nextCallingFetchKnown = true;
-        } else if (sameNext) {
+        if (sameNext) {
             strlcpy(xStation->service[1].calling, station->nextCalling, sizeof(xStation->service[1].calling));
             strlcpy(xStation->service[1].origin, station->nextOrigin, sizeof(xStation->service[1].origin));
             nextCallingFetchKnown = true;
         } else if (xStation->service[1].serviceID[0]) {
             nextCallingFetchKnown = (getServiceDetails(httpsClient, xStation->service[1].serviceID, accessId, stopId, 1) == UPD_SUCCESS);
-            if (nextCallingFetchKnown && useLineDirCache) storeLineDirCacheEntry(xStation->service[1].via, xStation->service[1].destination, xStation->service[1].calling, xStation->service[1].origin);
         } else {
             nextCallingFetchKnown = false;
         }
@@ -687,13 +640,6 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     // it timed out, or - for the position-1 pre-fetch - the position-0 call above already used and
     // released it): this makes reuse a pure bonus, never a new failure mode of its own.
     if (!httpsClient.connected()) {
-        // See MIN_SAFE_HEAP_FOR_FETCH's own comment - same guard as fetchDepartures(), only reached
-        // here when there's no already-open connection to reuse (so this would otherwise be a fresh
-        // TLS handshake, the expensive part).
-        if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) {
-            strcpy(js->lastResultMessage,"Error: Heap too fragmented, skipping cycle");
-            return UPD_NO_RESPONSE;
-        }
         httpsClient.setInsecure();
         httpsClient.setTimeout(8000);
         httpsClient.setConnectionTimeout(8000);
@@ -812,45 +758,6 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     return UPD_SUCCESS;
 }
 
-// See declaration comment in rejseplanenClient.h.
-int rejseplanenClient::findLineDirCacheEntry(const char *line, const char *destination) {
-    // lineDirCache is only allocated once useLineDirCache is actually used (see fetchDepartures())
-    // - null here means nothing's been cached yet (or S-tog mode has never fetched at all), not an
-    // error.
-    if (!lineDirCache || !line[0] || !destination[0]) return -1;
-    for (int i=0; i<lineDirCacheCount; i++) {
-        if (strcmp(lineDirCache[i].line,line)==0 && strcmp(lineDirCache[i].destination,destination)==0) return i;
-    }
-    return -1;
-}
-
-// See declaration comment in rejseplanenClient.h.
-void rejseplanenClient::storeLineDirCacheEntry(const char *line, const char *destination, const char *calling, const char *origin) {
-    if (!lineDirCache || !line[0] || !destination[0]) return;
-    int idx = findLineDirCacheEntry(line, destination);
-    if (idx < 0) {
-        // Full is extremely unlikely (Copenhagen S-tog has ~14 line+direction combos against this
-        // cache's 24 slots) - if it ever does happen, just stop growing rather than overflow;
-        // whichever combos got cached first keep working, the rest fall back to a real fetch each
-        // time, same as before this cache existed.
-        if (lineDirCacheCount >= MAXLINEDIRCACHE) return;
-        idx = lineDirCacheCount++;
-        strlcpy(lineDirCache[idx].line, line, sizeof(lineDirCache[idx].line));
-        strlcpy(lineDirCache[idx].destination, destination, sizeof(lineDirCache[idx].destination));
-    }
-    strlcpy(lineDirCache[idx].calling, calling, sizeof(lineDirCache[idx].calling));
-    strlcpy(lineDirCache[idx].origin, origin, sizeof(lineDirCache[idx].origin));
-}
-
-// See declaration comment in rejseplanenClient.h.
-bool rejseplanenClient::lookupCachedCalling(const char *line, const char *destination, char *callingOut, size_t callingOutSize, char *originOut, size_t originOutSize) {
-    int idx = findLineDirCacheEntry(line, destination);
-    if (idx < 0) return false;
-    strlcpy(callingOut, lineDirCache[idx].calling, callingOutSize);
-    strlcpy(originOut, lineDirCache[idx].origin, originOutSize);
-    return true;
-}
-
 void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages) {
     station->boardChanged = boardChanged;
     messages->numMessages = xMessages->numMessages;
@@ -904,10 +811,6 @@ String rejseplanenClient::searchStops(const char *query, const char *accessId, i
     stopSearchMax = maxResults;
     stopSearchName[0] = '\0';
     stopSearchExtId[0] = '\0';
-
-    // See MIN_SAFE_HEAP_FOR_FETCH's own comment. Lower stakes here (user-triggered from the web
-    // config, not a repeating background task), but no reason to risk it either.
-    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) return "[]";
 
     WiFiClientSecure httpsClient;
     httpsClient.setInsecure();
