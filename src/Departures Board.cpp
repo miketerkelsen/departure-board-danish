@@ -323,15 +323,6 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define SCREENSAVERINTERVAL 8000      // How often the screen is changed in sleep mode (ms - 8 seconds)
 #define DATAUPDATEINTERVAL 90000      // How often we fetch departure data (ms - 1.5 mins) - "default" option
 #define FASTDATAUPDATEINTERVAL 45000  // How often we fetch departure data (ms - 45 secs) - "fast" option
-// Floor between FORCED reactive board fetches (departure promotion, dropped-repeat - see
-// requestReactiveFetch()) - not applied to the regular apiRefreshRate cadence itself, only to how
-// soon one of those "something changed locally, get fresh data now" requests can re-trigger.
-// Without it, several such events close together (a busy S-tog hub with multiple lines can have
-// this happen within seconds of each other) each fire their own full fetch cycle back to back -
-// this coalesces a burst like that into one fetch shortly after the first, instead of one each.
-// departureBoard always returns the full current state anyway, so nothing is lost by the short
-// coalescing delay - it only ever delays a forced fetch, never skips one outright.
-#define MIN_REACTIVE_FETCH_INTERVAL_MS 20000UL
 #define RSSUPDATEINTERVAL 600000      // How often to refresh the RSS feed (ms - 10 mins)
 #define WEATHERUPDATEINTERVAL 1200000 // How often to update the weather forecast (ms - 20 mins)
 
@@ -383,9 +374,6 @@ static int prevProgressBarPosition=0;      // Used for progress bar smooth anima
 static int startupProgressPercent;         // Initialisation progress
 static bool wifiConnected = false;         // Connected to WiFi?
 volatile unsigned long nextDataUpdate = 0; // Next National Rail update time (millis)
-// When a board fetch was last actually triggered (xTaskNotifyGive'd to the fetch task) -
-// see requestReactiveFetch()'s own comment and MIN_REACTIVE_FETCH_INTERVAL_MS's definition.
-static unsigned long lastFetchTriggerTime = 0;
 static int dataLoadSuccess = 0;            // Count of successful data downloads
 static int dataLoadFailure = 0;            // Count of failed data downloads
 static unsigned long lastLoadFailure = 0;  // When the last failure occurred
@@ -2412,22 +2400,6 @@ void drawStationBoard() {
   u8g2.sendBuffer();
 }
 
-// Requests an immediate board data refresh, but never sooner than MIN_REACTIVE_FETCH_INTERVAL_MS
-// since a fetch was last actually triggered (see that constant's own comment for why). Every
-// "something changed locally, get fresh data now" call site (departure promotion, dropped-repeat)
-// should go through this instead of setting nextDataUpdate directly - this only ever delays a
-// forced fetch to the nearest allowed moment, never skips one outright, and never pushes
-// nextDataUpdate LATER than whatever it's already set to (matching the "only ever bring it
-// forward" pattern used elsewhere for nextDataUpdate).
-void requestReactiveFetch() {
-  unsigned long earliestAllowed = lastFetchTriggerTime + MIN_REACTIVE_FETCH_INTERVAL_MS;
-  if (millis() >= earliestAllowed) {
-    nextDataUpdate = millis();
-  } else if (nextDataUpdate > earliestAllowed) {
-    nextDataUpdate = earliestAllowed;
-  }
-}
-
 void updateRailDepartures() {
   rejseplanenData.loadDepartures(&station,&messages);
   // Rejseplanen doesn't always retire a service from its own departureBoard response as promptly as
@@ -2469,10 +2441,7 @@ void updateRailDepartures() {
     // together that the next one can arrive before this catches up, that could otherwise mean the
     // line never gets a real chance to fill in at all - always dropping a repeat, never getting far
     // enough to actually fetch the calling points for whichever service is genuinely primary now.
-    // Goes through requestReactiveFetch() (a floor, not a straight "now") rather than setting
-    // nextDataUpdate directly - a busy S-tog board can hit this drop path repeatedly in a short
-    // burst, and this coalesces that into one fetch shortly after instead of one per drop.
-    requestReactiveFetch();
+    nextDataUpdate = millis();
   }
   lastDataLoadTime = millis();
   noDataLoaded = false;
@@ -3175,7 +3144,6 @@ void departureBoardLoop() {
     // Initiate a background update on Core 0
     fetchMode = FETCH_BOARD;
     fetchInProgress = true;
-    lastFetchTriggerTime = millis(); // see requestReactiveFetch() - the floor it enforces measures from here
     xTaskNotifyGive(fetchTaskHandle);
     if (firstLoad) {
       waitForFirstLoad();
@@ -3516,11 +3484,7 @@ void departureBoardLoop() {
       // full fetch cycle measures ~2.5s on real hardware, not the multi-handshake cost this was
       // originally trying to avoid. Pre-fetch is kept as a bonus for the common case where it wins the
       // race and this fetch's result just confirms what's already showing, not as the only path.
-      // Goes through requestReactiveFetch() (a floor under how soon this can re-trigger) rather than
-      // setting nextDataUpdate directly - a busy S-tog hub can have several departures within
-      // seconds of each other, and this coalesces a burst like that into one fetch shortly after
-      // the first instead of firing a full fetch cycle for every single one.
-      requestReactiveFetch();
+      nextDataUpdate = millis();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
