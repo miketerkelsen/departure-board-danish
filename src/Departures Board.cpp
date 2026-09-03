@@ -1559,7 +1559,12 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
 }
 
 // Load the configuration settings (if they exist, if not create a default set for the Web GUI page to read)
-void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFIG) {
+// applyStartupMode: true only for the two loadConfig() calls setup() itself makes during an actual
+// power-on/restart boot sequence (early-params pass and the later full pass once the clock's set) -
+// every other call site (the physical mode button, a web config Save, a scheduler/carousel switch)
+// leaves this at its default false, so none of those live-operation paths are affected by it. See
+// "startupMode"'s own comment below for why this needs to be a separate flag from coldBoot.
+void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFIG, bool applyStartupMode = false) {
   JsonDocument doc;
 
   // Set defaults
@@ -1622,7 +1627,20 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["rssPriority"].is<bool>())       rssPriority = settings["rssPriority"];
 
         if (requestedMode != MODE_NEXTMODE) {
-          if (settings[F("mode")].is<int>())            boardMode = settings[F("mode")];
+          // "startupMode" is a separate, explicitly-chosen setting from "mode" (see web/index.htm's
+          // own comment on its dedicated dropdown) - "mode" also doubles as "whatever mode is
+          // currently live", updated every time the web config's tab+Save is used to switch modes on
+          // the running board, which is why a plain reboot used to always come back up in whatever
+          // mode happened to be selected the last time anyone hit Save, even if that was only meant
+          // as a quick look rather than a new daily default. Only consulted here when
+          // applyStartupMode is set (i.e. only during setup()'s own boot-sequence calls to this
+          // function) - falls back to "mode" when absent, so an existing config saved before this
+          // field existed behaves exactly as it did before.
+          if (applyStartupMode && settings[F("startupMode")].is<int>()) {
+            boardMode = settings[F("startupMode")];
+          } else if (settings[F("mode")].is<int>()) {
+            boardMode = settings[F("mode")];
+          }
         }
 
         if (coldBoot) {
@@ -4093,7 +4111,7 @@ void setup(void) {
   strcpy(station.location,"");                // No default location
   strcpy(weatherMsg,"");                      // No weather message
   loadApiKeys();                              // Load the API keys from the apiKeys.json
-  loadConfig(true);                           // Load the configuration settings from config.json
+  loadConfig(true,MODE_LOADCONFIG,true);      // Load the configuration settings from config.json (applyStartupMode: this is the real power-on boot)
   u8g2.setContrast(brightness);               // Set the panel brightness to the user saved level
   if (flipScreen) u8g2.setFlipMode(1);
   u8g2.clearBuffer();
@@ -4386,8 +4404,9 @@ void setup(void) {
   prevUpdateCheckDay = timeinfo.tm_mday;
   sprintf(currentTime,"%02d:%02d:%02d",timeinfo.tm_hour,timeinfo.tm_min,timeinfo.tm_sec);
 
-  // Reload settings (clock has now been set)
-  loadConfig();
+  // Reload settings (clock has now been set) - still the same boot sequence as the earlier
+  // loadConfig(true,...) call above, so applyStartupMode stays true here too.
+  loadConfig(false,MODE_LOADCONFIG,true);
 
   station.numServices=0;
   if (rssEnabled && boardMode!=MODE_DKBUS) {

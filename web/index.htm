@@ -417,6 +417,22 @@
                 <div class="py-2">
                   <div class="d-flex justify-content-between align-items-center">
                     <div>
+                      <label class="form-check-label d-block" for="startupMode">Startup mode</label>
+                      <div class="small text-body-secondary">Which mode the board boots into after a restart or power loss - independent of the "Board Mode" picker above, which only changes what's showing right now</div>
+                    </div>
+                    <select id="startupMode" class="form-select w-auto">
+                      <option value="3">Tog</option>
+                      <option value="6">S-tog</option>
+                      <option value="4">Letbane</option>
+                      <option value="5">Bus</option>
+                    </select>
+                  </div>
+                </div>
+                <hr class="my-0 opacity-10">
+
+                <div class="py-2">
+                  <div class="d-flex justify-content-between align-items-center">
+                    <div>
                       <label class="form-check-label d-inline-block" for="optTouch">Enable touch sensor</label>
                       <i class="bi bi-info-circle ms-1" data-bs-toggle="tooltip" data-bs-placement="right"
                         title="A tap switches between configured modes (or wakes from sleep mode). If the carousel or scheduler mode is active, a tap switches to the next location immediately."
@@ -729,7 +745,8 @@
       clearDkCallingStation: document.getElementById('clearDkCallingStation'),
       letbaneName: document.getElementById('letbaneName'),
       dkBusName: document.getElementById('dkBusName'),
-      stogName: document.getElementById('stogName')
+      stogName: document.getElementById('stogName'),
+      startupMode: document.getElementById('startupMode')
     };
 
     document.getElementById('formsettings').addEventListener('keydown', function(e) { if (e.key === 'Enter') e.preventDefault(); });
@@ -1356,6 +1373,10 @@
 
       appState.boardMode = s.mode ?? 3;
       highlightModeButtons(appState.boardMode);
+      // Independent of appState.boardMode above (which is just "which tab is being edited right
+      // now") - falls back to whatever "mode" is (today's boot behaviour) for a board saved before
+      // this setting existed.
+      elements.startupMode.value = s.startupMode ?? s.mode ?? 3;
 
       elements.dkName.value = appState.dkName;
       elements.dkCallingStation.value = appState.dkCallingStation;
@@ -1503,6 +1524,7 @@
       const s = appState.jsonSettings;
       let needRestart = ((s.hostname || "") != elements.customHost.value.trim());
       s.mode = appState.boardMode;
+      s.startupMode = parseInt(elements.startupMode.value);
       s.brightness = parseInt(elements.brightness.value);
       s.sleep = isChecked("enableSleep");
       s.darkSleep = isChecked("darkSleep");
