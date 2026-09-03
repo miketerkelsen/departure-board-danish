@@ -2290,6 +2290,72 @@ bool isCallingMessage(const char* msg) {
 // Forward declaration - defined further down, needed here for the "originates here" message below.
 static bool containsCaseInsensitive(const char* haystack, const char* needle);
 
+// Builds the primary service's scrolling message set (cancellation notice, delay reason, "Stopper
+// ved" calling-at list, "starts here" notice) into line2[]/numMessages from station's current
+// state - assumes station.numServices>0 (caller's job to check) and starts from numMessages=0
+// (caller's job to reset first if reusing an already-populated numMessages, e.g. drawStationBoard()
+// resets it itself at its own top before this ever runs there).
+//
+// Factored out of drawStationBoard() so the promotion code in departureBoardLoop() (when a train
+// departs and the next one gets promoted into position [0]) can rebuild JUST the message set
+// without a full board redraw - it already does its own narrower, targeted redraw of the primary
+// service line itself (drawPrimaryService()) rather than calling drawStationBoard() wholesale.
+// Before this existed, that promotion code updated station.calling/callingKnown directly but never
+// touched line2[]/numMessages at all, so the visible "Stopper ved" message stayed exactly whatever
+// it was before the promotion (typically blank, cleared by the departed-train animation) until the
+// next full drawStationBoard() call from a regular fetch cycle happened to land - which the S-tog
+// line+direction cache made worse, not better: callingKnown becomes true immediately from a cache
+// hit, so the reactive-refetch-when-blank trigger a few lines below never fires either, meaning nothing
+// ever prompted a fresh drawStationBoard() call soon enough to fix it.
+void buildServiceMessages() {
+  if (station.service[0].isCancelled) {
+    // This train is cancelled - there's no calling-at list for it, so show Rejseplanen's own
+    // reason if it gave one, otherwise a generic cancellation notice rather than leaving this
+    // line blank.
+    if (station.serviceMessage[0]) {
+      strcpy(line2[0],station.serviceMessage);
+    } else {
+      strcpy(line2[0],"Denne afgang er aflyst. Se sk\xE6rmene for yderligere info.");
+    }
+    numMessages=1;
+  } else {
+    // The train is not cancelled
+    if (station.service[0].isDelayed && station.serviceMessage[0]) {
+      // The train is delayed and there's a reason
+      strcpy(line2[0],station.serviceMessage);
+      numMessages++;
+    }
+    if (station.calling[0]) {
+      // Add the calling stops message
+      sprintf(line2[numMessages],"Stopper ved: %s",station.calling);
+      numMessages++;
+    }
+    // Rejseplanen's client leaves station.origin blank whenever the requested stop IS the
+    // service's origin, so that's a direct signal - no need to compare names. But it's ALSO
+    // blank whenever the calling-at fetch simply hasn't succeeded yet (still fetching, or the
+    // last attempt failed) - callingKnown distinguishes "confirmed this service starts here"
+    // from "don't actually know yet", so a slow/failed fetch no longer gets shown as a false
+    // "starts here" (see rdStation::callingKnown's own comment for the full reasoning).
+    if (station.callingKnown && !station.origin[0]) {
+      // Service originates at this station. opco is the operator name straight from
+      // Rejseplanen (e.g. "DSB", "DSB S-tog") - some of those already contain "tog" (S-tog's
+      // does), so appending "-tog" unconditionally produced "Dette DSB S-tog-tog starter her."
+      // Only add the suffix when opco doesn't already have it.
+      if (station.service[0].opco[0] && !containsCaseInsensitive(station.service[0].opco,"tog")) {
+        sprintf(line2[numMessages],"Dette %s-tog starter her.",station.service[0].opco);
+      } else if (station.service[0].opco[0]) {
+        sprintf(line2[numMessages],"Dette %s starter her.",station.service[0].opco);
+      } else {
+        strcpy(line2[numMessages],"Dette tog starter her.");
+      }
+      numMessages++;
+    }
+    // No "This is the X service from Y."/"This service originated at Y." message when the
+    // service originates elsewhere any more (removed per user request - it didn't carry any
+    // actionable information for a departure board).
+  }
+}
+
 // Draw the initial Departures Board
 void drawStationBoard() {
   if (showClockNoServices && station.numServices == 0) {
@@ -2324,52 +2390,7 @@ void drawStationBoard() {
     if (station.numServices) {
       drawPrimaryService(false);
       if (station.service[0].via[0]) viaTimer=millis()+4000;
-      if (station.service[0].isCancelled) {
-        // This train is cancelled - there's no calling-at list for it, so show Rejseplanen's own
-        // reason if it gave one, otherwise a generic cancellation notice rather than leaving this
-        // line blank.
-        if (station.serviceMessage[0]) {
-          strcpy(line2[0],station.serviceMessage);
-        } else {
-          strcpy(line2[0],"Denne afgang er aflyst. Se sk\xE6rmene for yderligere info.");
-        }
-        numMessages=1;
-      } else {
-        // The train is not cancelled
-        if (station.service[0].isDelayed && station.serviceMessage[0]) {
-          // The train is delayed and there's a reason
-          strcpy(line2[0],station.serviceMessage);
-          numMessages++;
-        }
-        if (station.calling[0]) {
-          // Add the calling stops message
-          sprintf(line2[numMessages],"Stopper ved: %s",station.calling);
-          numMessages++;
-        }
-        // Rejseplanen's client leaves station.origin blank whenever the requested stop IS the
-        // service's origin, so that's a direct signal - no need to compare names. But it's ALSO
-        // blank whenever the calling-at fetch simply hasn't succeeded yet (still fetching, or the
-        // last attempt failed) - callingKnown distinguishes "confirmed this service starts here"
-        // from "don't actually know yet", so a slow/failed fetch no longer gets shown as a false
-        // "starts here" (see rdStation::callingKnown's own comment for the full reasoning).
-        if (station.callingKnown && !station.origin[0]) {
-          // Service originates at this station. opco is the operator name straight from
-          // Rejseplanen (e.g. "DSB", "DSB S-tog") - some of those already contain "tog" (S-tog's
-          // does), so appending "-tog" unconditionally produced "Dette DSB S-tog-tog starter her."
-          // Only add the suffix when opco doesn't already have it.
-          if (station.service[0].opco[0] && !containsCaseInsensitive(station.service[0].opco,"tog")) {
-            sprintf(line2[numMessages],"Dette %s-tog starter her.",station.service[0].opco);
-          } else if (station.service[0].opco[0]) {
-            sprintf(line2[numMessages],"Dette %s starter her.",station.service[0].opco);
-          } else {
-            strcpy(line2[numMessages],"Dette tog starter her.");
-          }
-          numMessages++;
-        }
-        // No "This is the X service from Y."/"This service originated at Y." message when the
-        // service originates elsewhere any more (removed per user request - it didn't carry any
-        // actionable information for a departure board).
-      }
+      buildServiceMessages();
 
       if (noScrolling && station.numServices>1) {
         drawServiceLine(1,LINE2);
@@ -3418,13 +3439,22 @@ void departureBoardLoop() {
       // nothing. Locally shift the list down one slot instead of waiting on the network, same as
       // Rejseplanen/National Rail will themselves do on the next real fetch.
       promoteNextService();
+      // For S-tog, the newly-promoted primary's calling-at is usually already sitting in
+      // rejseplanenClient's persistent line+direction cache (see fetchDepartures()'s
+      // useLineDirCache) from an earlier departure on the same line+direction - a pure local
+      // lookup, no fetch involved, so this can show correct calling-at the INSTANT the promotion
+      // happens. Checked first, before the older pre-fetch consumption below, since it doesn't
+      // depend on timing (pre-fetch only helps if it happened to land before THIS promotion; the
+      // cache helps as soon as this line+direction has EVER been seen, on any earlier departure).
+      if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+        station.callingKnown = true;
       // Whatever's now primary was sitting in position [1] a moment ago, and rejseplanenClient
       // pre-fetches calling-at for that position ahead of time precisely for this moment (see
       // rdStation::nextCalling and fetchDepartures()) - if it landed in time, use it immediately
       // instead of clearing and waiting on a fresh fetch. nextCalling/nextOrigin describe whatever
       // WAS in position [1] either way, so they get consumed (or discarded, if not known) and reset
       // here regardless - position [1] now holds something different that hasn't been pre-fetched yet.
-      if (station.nextCallingKnown) {
+      } else if (station.nextCallingKnown) {
         strlcpy(station.calling, station.nextCalling, sizeof(station.calling));
         strlcpy(station.origin, station.nextOrigin, sizeof(station.origin));
         station.callingKnown = true;
@@ -3457,15 +3487,30 @@ void departureBoardLoop() {
         promoteNextService();
         // Whatever calling-at was just consumed/discarded above described the service this loop just
         // skipped past, not whichever one it lands on next - invalidate it each time round so a
-        // multi-departure cluster can never show a skipped train's stale stops.
-        station.calling[0] = '\0';
-        station.origin[0] = '\0';
-        station.callingKnown = false;
+        // multi-departure cluster can never show a skipped train's stale stops. For S-tog, try the
+        // line+direction cache first (same reasoning as the single-promotion case above) before
+        // falling back to blank - a back-to-back cluster is exactly the case with no pre-fetch
+        // coverage at all beyond position [1], so the cache matters most right here.
+        if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+          station.callingKnown = true;
+        } else {
+          station.calling[0] = '\0';
+          station.origin[0] = '\0';
+          station.callingKnown = false;
+        }
       }
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
         drawPrimaryService(isShowingVia);
         u8g2.updateDisplayArea(0,1,32,3);
+        // Rebuild the message set (see buildServiceMessages()'s own comment for why this promotion
+        // path needs to do this explicitly rather than relying on the next drawStationBoard() call -
+        // this is the fix for calling-at never appearing after the cache made callingKnown true
+        // immediately, skipping the reactive-refetch that used to eventually trigger a rebuild).
+        numMessages = 0;
+        buildServiceMessages();
+        currentMessage = numMessages-1;
+        isScrollingStops = false;
       }
       // The "next departures" row(s) below the primary aren't tied to this animation at all - they're
       // driven by their own independent timer (serviceTimer/line3Service), so without this, whatever
@@ -4067,7 +4112,11 @@ void fetchDeparturesTask(void *pvParameters) {
             // Own dedicated board - always S-tog-only (no product checkboxes to read), and no
             // calling-direction filter of its own (that's a DK Rail-only config field) so calling
             // points are fetched unfiltered from whichever service is first.
-            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset);
+            // useLineDirCache=true here only - S-tog's calling points are a property of the
+            // line+direction, confirmed identical across many real trips minutes apart, so once
+            // known for a combo it's reused for every future departure on it with no fetch at all.
+            // See rejseplanenClient.h's LineDirCallingEntry for why this is scoped to S-tog only.
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset,true);
             nextDataUpdate = millis()+apiRefreshRate;
             break;
         }
