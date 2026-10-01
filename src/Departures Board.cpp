@@ -4399,7 +4399,15 @@ unsigned long nextFetchDelay() {
   bool isFailure = (lastUpdateResult==UPD_HTTP_ERROR || lastUpdateResult==UPD_TIMEOUT ||
                      lastUpdateResult==UPD_NO_RESPONSE || lastUpdateResult==UPD_DATA_ERROR ||
                      lastUpdateResult==UPD_INCOMPLETE);
-  if (isFailure && station.numServices==0) return 5000UL;
+  // Only the first few failures in a row get the fast retry. Unbounded, a longer problem (Rejseplanen
+  // down, or this board's own heap too fragmented to complete a request - 208 failures in 2.5 hours
+  // was seen exactly like that) would keep sending a request every few seconds, ignoring the monthly
+  // budget entirely and burning real quota on attempts that are failing anyway. After the third in a
+  // row it falls back to the normal (budget-paced) interval, which is also gentler on a struggling
+  // network or heap. Any success resets the count.
+  static uint8_t consecutiveFailures = 0;
+  if (isFailure) { if (consecutiveFailures < 255) consecutiveFailures++; } else consecutiveFailures = 0;
+  if (isFailure && station.numServices==0 && consecutiveFailures <= 3) return 5000UL;
   unsigned long pacedMs = computePacedIntervalMs();
   return pacedMs > (unsigned long)apiRefreshRate ? pacedMs : (unsigned long)apiRefreshRate;
 }
