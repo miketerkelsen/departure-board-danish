@@ -25,6 +25,15 @@
 
 #define MAXWEATHERSIZE 50
 
+// "Fra <stop> køres som <line> mod <destination>." (Danish Rail split-train announcement - see
+// rejseplanenClient's rjDirectionSegment for how this is built). Deliberately much smaller than
+// MAXCALLINGSIZE/MAXMESSAGESIZE - DRAM is tight enough on this board (a previous, more generous size
+// here overflowed the linker's DRAM segment by ~11KB) that this is sized to the realistic case (the
+// longest real Danish station/line names seen are well under half of this) rather than the
+// theoretical worst case (MAXLOCATIONSIZE*2+MAXLINESIZE+literal text) - snprintf truncates safely if
+// an unusually long combination ever exceeds it, never overflows.
+#define MAXSPLITINFOSIZE 128
+
 #define OTHER 0
 #define TRAIN 1
 #define BUS 2
@@ -46,6 +55,10 @@ struct rdService {
                        // numbers, always 1-3 chars) was silently truncating those to "9-1"/"11-1"
     bool isCancelled;
     bool isDelayed;
+    uint8_t sSec;       // seconds component of the departure time (Metro times are second-precise,
+                        // e.g. "08:58:39") - sTime itself stays HH:MM. Deliberately declared here,
+                        // between the bools and the int below: it sits in what was already alignment
+                        // padding, so it costs no DRAM (this struct is multiplied by MAXBOARDSERVICES).
     int trainLength;
     byte classesAvailable;
     char opco[50];
@@ -58,6 +71,11 @@ struct rdService {
     int serviceType;
     int timeToStation;  // Only for TfL
     bool isSTog;  // Rejseplanen catOut=="S-Tog" - drives the København H S-tog line-badge board style
+    bool isMetro;  // Rejseplanen catOut contains "Metro" - drives MODE_METRO's round line-badge style,
+                   // see useMetroStyle() - and doubles as the MODE_METRO fetch's own content filter
+                   // (see rejseplanenClient::finaliseDepartureRecord()'s metroOnlyFilter), since the
+                   // product mask that reliably includes Metro isn't narrow enough to exclude everything
+                   // else on its own.
     char serviceID[MAXJOURNEYREFSIZE];  // LDBWS service id (UK) or JourneyDetailRef.ref token
                                          // (Rejseplanen) - a genuinely unique identifier for this
                                          // specific journey, unlike sTime+destination which two
@@ -88,6 +106,14 @@ struct rdService {
     char nextOrigin[MAXLOCATIONSIZE];
     bool nextCallingKnown;
     char serviceMessage[MAXMESSAGESIZE];  // Only store the service message for the first service returned
+    // "Fra <stop> køres som <line> mod <destination>." (Danish Rail only, e.g. a DSB ICL train
+    // combining two destinations that detach from each other partway - see rejseplanenClient's
+    // rjDirectionSegment for how this is built) - empty when the current primary service doesn't
+    // split. Shown as its own message line right after "Stopper ved", see buildServiceMessages() in
+    // "Departures Board.cpp". nextSplitInfo mirrors nextCalling/nextOrigin - pre-fetched for
+    // whichever service sits in position [1], consumed the same way at promotion time.
+    char splitInfo[MAXSPLITINFOSIZE];
+    char nextSplitInfo[MAXSPLITINFOSIZE];
     rdService service[MAXBOARDSERVICES];
   };
 
@@ -104,6 +130,7 @@ struct rdService {
                        // numbers, always 1-3 chars) was silently truncating those to "9-1"/"11-1"
     bool isCancelled;
     bool isDelayed;
+    uint8_t sSec;       // see rdService.sSec
     int trainLength;
     byte classesAvailable;
     char opco[50];
@@ -114,6 +141,7 @@ struct rdService {
     char serviceID[MAXJOURNEYREFSIZE];  // LDBWS service id (UK) or JourneyDetailRef.ref token (Rejseplanen)
     char sortTime[6];
     bool isSTog;  // see rdService.isSTog
+    bool isMetro;  // see rdService.isMetro
   };
 
   struct rdiStation {

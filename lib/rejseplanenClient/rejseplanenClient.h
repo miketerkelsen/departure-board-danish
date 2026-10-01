@@ -20,6 +20,7 @@
 #include <WiFiClientSecure.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
+#include <stdarg.h>
 
 #define MAXPATHSTACK 12                // headroom for deeply-nested fields (e.g. service alert Messages)
 
@@ -50,12 +51,48 @@ class rejseplanenClient: public JsonListenerGS {
           char name[MAXLOCATIONSIZE];
           char extId[16];
           char time[6];          // HH:MM this service calls at this stop (arrTime, falling back to depTime)
+          // journeyDetail's own position index for this stop along the WHOLE physical route (0-based,
+          // same numbering Directions/Direction below uses for routeIdxFrom/routeIdxTo) - only needed
+          // to find exactly which stop a splitting train's destination narrows at, see
+          // rjDirectionSegment's own comment.
+          int routeIdx;
         };
+
+        // journeyDetail's "Directions/Direction" array - present (with 2+ entries) only for a
+        // service that splits into multiple physical portions en route (confirmed live: a DSB ICL
+        // train combining e.g. "Sønderborg St. og Aalborg Lufthavn St." shows exactly two entries,
+        // {value:"Sønderborg St. og Aalborg Lufthavn St.", routeIdxTo:23} then
+        // {value:"Aalborg Lufthavn St.", routeIdxTo:32} - 23 being the routeIdx of Fredericia St.,
+        // the actual real-world junction where that train's Sønderborg portion detaches). Only
+        // routeIdxTo is tracked (not routeIdxFrom) - segments are always contiguous starting at 0, so
+        // segment[i]'s routeIdxTo is exactly segment[i+1]'s routeIdxFrom, and is all that's needed to
+        // find the stop (by matching routeIdx) where each narrowing happens.
+        struct rjDirectionSegment {
+          char value[MAXLOCATIONSIZE];
+          int routeIdxTo;
+        };
+        #define MAXDIRECTIONSEGMENTS 2  // real splits are essentially always exactly 2 segments
+        rjDirectionSegment directionSegments[MAXDIRECTIONSEGMENTS];
+        int numDirectionSegments = 0;
+
+        // getServiceDetails()'s built split-announcement text for targetIdx 0/1 respectively -
+        // deliberately NOT a field on rdiService/xStation->service[] (which loadDepartures() copies
+        // from): that struct is repeated MAXBOARDSERVICES(24) times per station for every client
+        // (UK rail/TfL/bus included, none of which have splitting services at all), so a field there
+        // costs 24x whatever its size is. Split info is only ever meaningful for targetIdx 0 or 1
+        // (the only values getServiceDetails() is ever called with), so two private scalars here -
+        // read directly by loadDepartures() below, a member of this same class - avoid that entirely.
+        char pendingSplitInfo[2][MAXSPLITINFOSIZE];
 
         char stopScratchName[MAXLOCATIONSIZE];
         char stopScratchExtId[16];
         char stopScratchArrTime[9];
         char stopScratchDepTime[9];
+        int stopScratchRouteIdx = -1;
+        // Directions/Direction's "value" arrives before its "routeIdxTo" in every response seen live
+        // (value, flag, routeIdxFrom, routeIdxTo, in that order) - held here until routeIdxTo shows
+        // up, which is what actually finalises the segment (see value()'s own handling of that path).
+        char pendingDirectionValue[MAXLOCATIONSIZE];
         bool boardChanged = false;
 
         // Raw, per-record scratch space (a Departure or a journeyDetail Stop entry),
@@ -107,8 +144,45 @@ class rejseplanenClient: public JsonListenerGS {
         // target array, so it's captured separately here instead of relying on pendingKey for it.
         char targetElementKey[MAXKEYNAMESIZE];
 
+        // Same problem as targetElementKey above, generalised to ANY array of objects, not just the
+        // designated target array - e.g. journeyDetail's "Directions/Direction" (one entry per
+        // destination segment of a splitting train) or location.name's "productAtStop" (one entry
+        // per line serving a stop). Without this, only that array's FIRST element ever gets a
+        // correctly-built path for its fields; every element after it inherits whatever key() last
+        // ran while walking the PREVIOUS element (the stale-pendingKey bug described above) - live-
+        // caught: a splitting train's SECOND Direction entry (the actual final-branch destination,
+        // e.g. "Aalborg Lufthavn St." alone) would silently never be seen without this.
+        // Indexed by arrayDepth-1 (arrayDepth is always >=1 inside any array), captured fresh on
+        // EVERY startArray() call regardless of whether that array is "the" target array - reading
+        // stale data from a previous, now-closed array at the same depth is never possible since
+        // nothing reads slot [arrayDepth-1] before the current startArray() at that same depth has
+        // already written it. Sized to 4, not MAXPATHSTACK(12) - every array actually walked here
+        // (Stops/Stop, Directions/Direction, productAtStop) sits just 1 level deep; a genuinely
+        // deeper array (arrayDepth-1 >= 4) simply isn't tracked, falling back to the pre-fix
+        // behaviour (correct for its first element only) - no worse than before this fix existed,
+        // and DRAM here is tight enough that generous headroom for a case that doesn't occur isn't
+        // worth its cost.
+        #define MAXARRAYDEPTHTRACK 4
+        // 32, not MAXKEYNAMESIZE (50): every array key this parser actually needs to remember (Departure,
+        // Stops, Directions, Trip, Leg, ...) is well under 20 characters, and DRAM on this board is tight
+        // enough that the 4 x 18 bytes saved here mattered. A longer key is just truncated (strlcpy) -
+        // harmless, since it could only affect an array this parser never reads fields out of.
+        #define MAXARRAYKEYSIZE 32
+        char arrayElementKeyByDepth[MAXARRAYDEPTHTRACK][MAXARRAYKEYSIZE];
+        // stackTop value at which THIS array's own elements begin - same "captured once at
+        // startArray(), read at each element's startObject()" pattern as arrayBaseDepth is for the
+        // target array specifically, just per-depth instead of a single value.
+        int arrayElementBaseDepthByDepth[MAXARRAYDEPTHTRACK];
+
         bool fetchingDepartures;       // true = parsing departureBoard, false = parsing journeyDetail
         bool searchingStops = false;   // true = parsing location.name (stop-name search), see searchStops()
+        // true = parsing a /api/trip response, looking for the one Leg findMetroTripRef() wants - see
+        // that function and finaliseTripLeg(). tripWantIdx is the xStation->service[] slot whose line/
+        // direction the Leg must match (-1 when not in use); tripFound latches once it's found, after
+        // which raw.ref holds that Leg's journey reference and the rest of the response is ignored.
+        bool fetchingTrip = false;
+        bool tripFound = false;
+        int8_t tripWantIdx = -1;
         bool inTargetArray = false;    // inside the "Departure" (or "Stops/Stop") array
         int arrayDepth = 0;
 
@@ -215,10 +289,35 @@ class rejseplanenClient: public JsonListenerGS {
         // for why this distinction matters).
         bool callingFetchKnown = false;
         bool nextCallingFetchKnown = false;
+        // Set for the duration of a MODE_METRO fetch (see fetchDepartures()'s metroOnly param) -
+        // finaliseDepartureRecord() checks this and discards any parsed Departure whose catOut isn't
+        // Metro. Needed because the product bitmask that reliably includes Metro (see METRO_PRODUCTS
+        // in "Departures Board.cpp") is deliberately wider than just Metro - its exact product bit
+        // isn't confirmed against the live API yet, so this casts a wide net and filters by catOut
+        // instead, the same way isSTog/isBus already do downstream of an equally shared products
+        // request. Without this, a dedicated Metro board would show whatever else that wide mask
+        // happens to also catch mixed in among the M-lines.
+        bool metroOnlyFilter = false;
+
+        // Running count of actual Rejseplanen HTTP requests sent since boot - incremented at each of
+        // the three points this client ever writes a request out onto an already-connected socket
+        // (fetchDepartures()'s departureBoard GET, getServiceDetails()'s journeyDetail GET, and
+        // searchStops()'s location.name GET). Deliberately counted at the moment of SENDING, not at
+        // connect() - a plain TCP/TLS connect failure never reaches Rejseplanen's server at all, so it
+        // can't have consumed anything against their quota, but a sent request has, regardless of
+        // whether the response that comes back is a success, an error, or a timeout. Read by the main
+        // sketch's monthly request-budget pacer (see apiRequestBudget in "Departures Board.cpp") -
+        // Rejseplanen's API exposes no usage/quota telemetry of its own (confirmed earlier this
+        // project), so self-counting every outgoing request is the only way to track it.
+        unsigned long apiRequestCount = 0;
 
         static bool compareTimes(const rdiService& a, const rdiService& b);
         void resetRawRecord();
         void finaliseDepartureRecord();
+        void finaliseTripLeg();
+        // Appends printf-style text to js->lastResultMessage, truncating instead of overflowing - that
+        // buffer is only 80 bytes and a Metro cycle can log several calling-at fetches into it.
+        void logResult(const char *fmt, ...);
         void finaliseCallingStop();
         void convertDanishToLatin1(char* input, size_t maxLen);
         void buildCurrentPath(const char* key);
@@ -231,6 +330,20 @@ class rejseplanenClient: public JsonListenerGS {
         // this is being called for slot 1 after slot 0's connection turned out non-reusable), so this
         // is never worse than the old always-fresh-connection behaviour, only sometimes better.
         int getServiceDetails(WiFiClientSecure &httpsClient, const char *ref, const char *accessId, const char *stopId, int targetIdx);
+        // Calling-at for xStation->service[idx], whatever kind it is: a straight getServiceDetails() on
+        // its own journey reference for everything except Metro. Metro departures carry NO journey
+        // reference (live-confirmed - the departureBoard returns an empty JourneyDetailRef for them),
+        // but the trip planner does return real ones for Metro legs, so for those this first asks
+        // /api/trip for a journey of the same line and direction from stopId to the line's terminus (or,
+        // for the M3 loop, to its "via" station), then runs getServiceDetails() on the reference that
+        // returns. Two requests per line+direction combo, cached for the day via the line+direction
+        // cache like S-tog's, so a handful of requests per day in total. Defined together with
+        // findMetroTripRef() in the .cpp.
+        int getCallingForService(WiFiClientSecure &httpsClient, int idx, const char *accessId, const char *stopId);
+        // Fetches /api/trip (origin stopId, destination destId, Metro only, line filtered to
+        // xStation->service[tripWantIdx]'s line, one trip) and leaves the matching Leg's journey
+        // reference in raw.ref. Returns UPD_SUCCESS only when one was found.
+        int findMetroTripRef(WiFiClientSecure &httpsClient, const char *accessId, const char *stopId, const char *destId, int idx);
         // Reads the status line + headers of an HTTP response already sent on `client`, returning the
         // Content-Length (-1 if the header was absent) and whether the server/response allows the
         // connection to be kept open for a follow-up request (false if the server itself sent
@@ -239,12 +352,15 @@ class rejseplanenClient: public JsonListenerGS {
         // then up to 1s to walk the header block - same budget both call sites used before this was
         // factored out.
         int readResponseHeaders(WiFiClientSecure &client, long &contentLength, bool &serverAllowsReuse, bool &chunked);
-        // Reads exactly contentLength bytes (or, if contentLength<0, until the connection closes - the
-        // pre-keep-alive fallback for a response with no Content-Length header) from `client`, feeding
-        // each byte to parser as it arrives. Returns bytes actually read; sets timedOut true if the
-        // deadline was hit (contentLength case) or the connection dropped before delivering everything
-        // promised - callers treat that as a failed fetch and must NOT reuse the connection afterward.
-        long readResponseBody(WiFiClientSecure &client, long contentLength, JsonStreamingParserGS &parser, unsigned long timeoutMs, bool &timedOut);
+        // Reads the response body from `client` and feeds it to parser. Three cases, matching what
+        // readResponseHeaders() found: chunked (decodes the "<hex size>\r\n<data>\r\n"... framing and
+        // hands the parser only the real payload bytes - see readResponseBody()'s own comment for why
+        // this can't just be read raw), a known contentLength (reads exactly that many bytes), or
+        // neither (contentLength<0, not chunked - the pre-keep-alive fallback: read until the
+        // connection closes). Returns bytes of actual payload read; sets timedOut true if the deadline
+        // was hit or the connection dropped before delivering everything promised - callers treat that
+        // as a failed fetch and must NOT reuse the connection afterward.
+        long readResponseBody(WiFiClientSecure &client, long contentLength, bool chunked, JsonStreamingParserGS &parser, unsigned long timeoutMs, bool &timedOut);
 
         virtual void whitespace(char c);
         virtual void startDocument();
@@ -261,7 +377,9 @@ class rejseplanenClient: public JsonListenerGS {
         // useLineDirCache: MODE_STOG passes true - see LineDirCallingEntry's own comment for what
         // this changes and why it's scoped to S-tog only. Every other mode leaves this at its
         // default (false) and behaves exactly as before.
-        int fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache = false);
+        // metroOnly: MODE_METRO passes true - see metroOnlyFilter's own comment. Every other mode
+        // leaves this at its default (false).
+        int fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache = false, bool metroOnly = false);
         void loadDepartures(rdStation *station, stnMessages *messages);
         // Looks up calling-at for a given line+destination directly from the persistent S-tog cache
         // (see LineDirCallingEntry), with NO network activity - a pure local lookup. Returns true
@@ -273,4 +391,9 @@ class rejseplanenClient: public JsonListenerGS {
         // for every DK mode, in place of making the user look up/type a numeric stop id by hand.
         // Returns a compact JSON array "[{"name":"...","id":"..."},...]", capped at maxResults.
         String searchStops(const char *query, const char *accessId, int maxResults = 8);
+        // Total Rejseplanen requests sent since boot - see apiRequestCount's own comment. The main
+        // sketch diffs successive reads of this against its own last-seen value to find out how many
+        // NEW requests happened since it last checked, rather than this client needing to know
+        // anything about calendar months or persisted budgets itself.
+        unsigned long getApiRequestCount() { return apiRequestCount; }
 };

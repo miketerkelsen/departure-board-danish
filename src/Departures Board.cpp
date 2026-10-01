@@ -309,6 +309,7 @@ static const char* const dkMonthLong[12] = {"januar","februar","marts","april","
 #define LETBANE_PRODUCTS 2048          // Rejseplanen product bitmask: bit 11 (Letbane)
 #define DKBUS_PRODUCTS 32              // Rejseplanen product bitmask: bit 5 (Bus)
 #define STOG_PRODUCTS 16               // Rejseplanen product bitmask: bit 4 (S-tog) - MODE_STOG's dedicated board is always S-tog-only
+#define METRO_PRODUCTS 1024            // Rejseplanen product bitmask: bit 10 (Metro) - confirmed against the live API (catOut "MET", cls 1024)
 
 // DK Tog/Letbane only ever show one departure at a time (rotating through a "next departure" slot,
 // same as the UK rail/tube boards), so unlike the Odense DK Bus board's 3-way split there's no
@@ -380,6 +381,44 @@ static unsigned long lastLoadFailure = 0;  // When the last failure occurred
 static bool noDataLoaded = true;           // True if no data received for the location
 static unsigned long lastDataLoadTime = 0; // Timestamp of last data load
 static long apiRefreshRate = DATAUPDATEINTERVAL; // User selected refresh rate for National Rail API (90/45 secs)
+
+// Monthly Rejseplanen request budget pacing - Rejseplanen's API exposes no usage/quota telemetry of
+// its own (confirmed earlier this project via a live response header/field check), and this board's
+// own default fetch cadence (960+/day just for the base departure-board fetch, before any calling-at
+// overhead) can comfortably exceed a modest monthly quota well before the month is even half over.
+// This self-tracks every actual Rejseplanen request (see rejseplanenClient's apiRequestCount) against
+// a user-configured monthly budget, and - when enabled - stretches nextFetchDelay()'s interval over
+// the course of the month so usage lands under budget at month-end instead of running out early and
+// then going completely dark until it rolls over. Off by default (apiBudgetPacingEnabled=false) so an
+// existing board's behaviour doesn't change until the user opts in and sets a real number.
+// Small fields grouped together (bool + int16_t + int8_t = 4 bytes, no padding needed) ahead of the
+// unsigned longs below, rather than interleaved with them - mixing sizes in declaration order left
+// the compiler padding each small field back out to 4-byte alignment individually, costing several
+// times what these fields actually need and tipping DRAM over budget by a handful of bytes.
+static bool apiBudgetPacingEnabled = false;
+static int16_t apiUsageYear = -1;                // -1 = not yet loaded from "/apiusage.json"/never initialised
+static int8_t apiUsageMonth = -1;                // 0-11 (tm_mon convention), matched against timeinfo.tm_mon
+static uint16_t apiMonthlyBudget = 25000;        // requests/month this board should stay under - capped
+                                                  // at 65535 (uint16_t) by these two fields' size, which
+                                                  // comfortably covers this project's actual numbers
+                                                  // (a shared 50000/month split across 2 boards) with
+                                                  // plenty of headroom even for a substantially higher
+                                                  // quota later - DRAM here is tight enough that a plain
+                                                  // unsigned long for a value that small isn't worth it.
+static uint16_t apiUsageThisMonth = 0;           // requests counted so far in apiUsageYear/apiUsageMonth
+static unsigned long apiUsageLastSeenCount = 0;  // last rejseplanenClient::getApiRequestCount() value seen,
+                                                  // so only the DELTA since last check gets added below
+static unsigned long apiUsageLastSaveMillis = 0; // throttles how often "/apiusage.json" is rewritten -
+                                                  // see saveApiUsage()'s own comment on flash wear
+// Bounds on the paced interval itself - pacing only ever stretches nextFetchDelay() longer than the
+// user's own chosen apiRefreshRate (see nextFetchDelay()), never shorter, so MIN here is really just a
+// sanity floor against a pathological budget/day-count producing something faster than that. MAX caps
+// how stale the board is ever allowed to go even if the budget is nearly exhausted very early in the
+// month - 15 minutes still shows a materially useful board, rather than pacing stretching towards the
+// (mathematically "correct" but practically useless) hours-long interval a truly exhausted budget
+// would otherwise compute.
+#define MIN_PACED_INTERVAL_SEC 45
+#define MAX_PACED_INTERVAL_SEC 900
 static int dateWidth;                      // Width of the displayed date in pixels
 static int dateDay;                        // Day of the month of displayed date
 static bool noScrolling = false;           // Suppress all horizontal scrolling
@@ -420,6 +459,7 @@ static bool dkRailIsSet = false;
 static bool letbaneIsSet = false;
 static bool dkBusIsSet = false;
 static bool stogIsSet = false;
+static bool metroIsSet = false;
 static bool schedulerActive = false;
 static bool carouselActive = false;
 static int activeSlotEventTime;
@@ -439,7 +479,8 @@ enum boardModes {
   MODE_DKRAIL = 3,
   MODE_LETBANE = 4,
   MODE_DKBUS = 5,
-  MODE_STOG = 6
+  MODE_STOG = 6,
+  MODE_METRO = 7
 };
 boardModes boardMode = MODE_DKRAIL;
 
@@ -1176,6 +1217,7 @@ void showNoDataScreen() {
       break;
     case MODE_DKBUS:
     case MODE_STOG:
+    case MODE_METRO:
       sprintf(msg,"Ingen data tilg\xE6ngelig for stop-id \"%s\".",locationCode);
       break;
   }
@@ -1431,6 +1473,7 @@ void resetLocationIds() {
   letbaneIsSet = false;
   dkBusIsSet = false;
   stogIsSet = false;
+  metroIsSet = false;
 }
 
 void saveFirmwareInfo() {
@@ -1463,27 +1506,37 @@ int getTimeInMinutes() {
 
 void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
   if (requestedMode == MODE_NEXTMODE) {
-    // Circular order: DKRAIL (Tog) -> STOG (S-tog) -> LETBANE (Letbane) -> DKBUS (Bus) -> (back to Tog)
+    // Circular order: DKRAIL (Tog) -> STOG (S-tog) -> LETBANE (Letbane) -> DKBUS (Bus) -> METRO -> (back to Tog)
     switch (boardMode) {
       case MODE_DKRAIL:
         if (stogIsSet) boardMode = MODE_STOG;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (metroIsSet) boardMode = MODE_METRO;
         break;
       case MODE_STOG:
         if (letbaneIsSet) boardMode = MODE_LETBANE;
         else if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (metroIsSet) boardMode = MODE_METRO;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         break;
       case MODE_LETBANE:
         if (dkBusIsSet) boardMode = MODE_DKBUS;
+        else if (metroIsSet) boardMode = MODE_METRO;
         else if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (stogIsSet) boardMode = MODE_STOG;
         break;
       case MODE_DKBUS:
+        if (metroIsSet) boardMode = MODE_METRO;
+        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
+        else if (stogIsSet) boardMode = MODE_STOG;
+        else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        break;
+      case MODE_METRO:
         if (dkRailIsSet) boardMode = MODE_DKRAIL;
         else if (stogIsSet) boardMode = MODE_STOG;
         else if (letbaneIsSet) boardMode = MODE_LETBANE;
+        else if (dkBusIsSet) boardMode = MODE_DKBUS;
         break;
     }
   } else {
@@ -1555,6 +1608,24 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
       convertDanishToLatin1(locationName, sizeof(locationName));
       break;
 
+    case MODE_METRO:
+      // Dedicated Copenhagen Metro board - reuses the DK Rail rail-style rendering pipeline entirely
+      // (see useMetroStyle()), just with its own location slot (so it can be configured independently
+      // of, and alongside, a MODE_DKRAIL/MODE_STOG location) and a fetch that's always Metro-only (see
+      // fetchDeparturesTask()'s MODE_METRO case).
+      if (slot["metroId"].is<const char*>())  strlcpy(locationCode, slot["metroId"], sizeof(locationCode));
+      if (isDefault) {
+        if (slot["metroName"].is<const char*>()) strlcpy(locationName, slot["metroName"], sizeof(locationName));
+        if (slot["metroLat"].is<float>())         locationLat = slot["metroLat"];
+        if (slot["metroLon"].is<float>())         locationLon = slot["metroLon"];
+      } else {
+        if (slot["name"].is<const char*>()) strlcpy(locationName, slot["name"], sizeof(locationName));
+        if (slot["lat"].is<float>())          locationLat = slot["lat"];
+        if (slot["lon"].is<float>())          locationLon = slot["lon"];
+      }
+      convertDanishToLatin1(locationName, sizeof(locationName));
+      break;
+
   }
 }
 
@@ -1588,6 +1659,7 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["letbaneId"].is<const char*>() && strlen(settings["letbaneId"])) letbaneIsSet = true; else letbaneIsSet = false;
         if (settings["dkBusId"].is<const char*>() && strlen(settings["dkBusId"])) dkBusIsSet = true; else dkBusIsSet = false;
         if (settings["stogId"].is<const char*>() && strlen(settings["stogId"])) stogIsSet = true; else stogIsSet = false;
+        if (settings["metroId"].is<const char*>() && strlen(settings["metroId"])) metroIsSet = true; else metroIsSet = false;
 
         if (settings["hostname"].is<const char*>())   strlcpy(hostname, settings["hostname"], sizeof(hostname));
         if (settings["showDate"].is<bool>())          dateEnabled = settings["showDate"];
@@ -1597,6 +1669,11 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["sleep"].is<bool>())             sleepEnabled = settings["sleep"];
         if (settings["darkSleep"].is<bool>())         sleepClock = !settings["darkSleep"];
         if (settings["fastRefresh"].is<bool>())       apiRefreshRate = settings["fastRefresh"] ? FASTDATAUPDATEINTERVAL : DATAUPDATEINTERVAL;
+        if (settings["apiBudgetPacing"].is<bool>())    apiBudgetPacingEnabled = settings["apiBudgetPacing"];
+        // Clamped rather than just narrowed - apiMonthlyBudget is a uint16_t (see its own comment on
+        // why), so an entry above 65535 would otherwise silently wrap to a small, wrong-looking number
+        // instead of the large-but-out-of-range one the user actually typed.
+        if (settings["apiMonthlyBudget"].is<int>())    apiMonthlyBudget = constrain(settings["apiMonthlyBudget"].as<int>(),0,65535);
         if (settings["weather"].is<bool>())           weatherEnabled = settings["weather"];
         if (settings["update"].is<bool>())            firmwareUpdates = settings["update"];
         if (settings["updateDaily"].is<bool>())       dailyUpdateCheck = settings["updateDaily"];
@@ -1839,7 +1916,7 @@ void softResetBoard(boardModes requestedMode) {
 
   if (rssEnabled && prevRssUrl != rssURL) {
     rssMessage[0] = '\0';
-    if (boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_STOG) {
+    if (boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_STOG || boardMode == MODE_METRO) {
       prevProgressBarPosition = 95;
       progressBar("Opdaterer RSS-nyheder",50);
       updateRssFeed();
@@ -1868,6 +1945,11 @@ void softResetBoard(boardModes requestedMode) {
       checkWeatherUpdate(prevLat,prevLon);
       progressBar("Initialiserer S-tog",70);
       break;
+
+    case MODE_METRO:
+      checkWeatherUpdate(prevLat,prevLon);
+      progressBar("Initialiserer Metro",70);
+      break;
   }
   station.numServices=0;
   messages.numMessages=0;
@@ -1888,7 +1970,7 @@ void switchToNextMode() {
     softResetBoard(MODE_LOADCONFIG);
   }
   else if (schedulerActive) softResetBoard(MODE_NEXTSCHEDULE);
-  else if (dkRailIsSet+letbaneIsSet+dkBusIsSet+stogIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
+  else if (dkRailIsSet+letbaneIsSet+dkBusIsSet+stogIsSet+metroIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
 }
 
 // WiFiManager callback, entered config mode
@@ -2046,6 +2128,14 @@ bool useSTogStyle(int idx) {
   return boardMode==MODE_DKRAIL && station.service[idx].isSTog && strcmp(locationCode,RJ_KBH_H_STOP_ID)==0;
 }
 
+// Copenhagen Metro's own dedicated board - same badge-style/countdown treatment as useSTogStyle(),
+// just always MODE_METRO (its own dedicated location slot, always fetched Metro-only - see
+// fetchDeparturesTask() - so unlike S-tog there's no mixed-board/per-service case to check).
+bool useMetroStyle(int idx) {
+  if (idx>=station.numServices) return false;
+  return boardMode==MODE_METRO;
+}
+
 // Rejseplanen has no seconds-resolution "time to arrival" field (unlike TfL), so approximate a
 // countdown from the service's (possibly realtime) HH:MM against the board's own current time -
 // down to the second (timeinfo.tm_sec), not just the minute. Steps down to "1/2 min" at the 30s
@@ -2067,23 +2157,45 @@ void sTogCountdownText(const rdService &svc, char *out, size_t outSize) {
   }
 }
 
-// Draws the S-tog line-letter badge: a small filled rounded box with the line letter "punched out"
-// in the background colour (e.g. a solid square with a black "A" knocked out of the white fill),
-// matching the roundel look of Copenhagen's real S-tog line signage. size is the height, and also
-// the width for ordinary single-letter lines (A, B, C, E, F, H), which stay perfectly square. A
-// label whose ink genuinely doesn't fit that square - currently only the Bx line - widens the badge
-// into a small rounded rectangle instead, matching how Copenhagen's own signage shows Bx as a wider
-// pill rather than squeezing two letters into the same square as the single-letter lines. Returns
-// the badge's actual drawn width, since callers can no longer assume it's always `size`. Saves/
-// restores whatever font was active on entry, so it can be called safely from mid-draw in either
-// drawPrimaryService() or drawServiceLine().
+// Same idea as sTogCountdownText() above, but rounds to the nearest HALF minute (e.g. "2 1/2 min")
+// instead of a whole one - matching real Copenhagen Metro platform displays, which show this finer
+// granularity throughout the countdown, not just as a final floor state. Kept separate from
+// sTogCountdownText() rather than changing it in place: that function's whole-minute rounding was a
+// deliberate earlier choice ("same as the Letbane board" - see its own comment), so S-tog keeps its
+// existing behaviour exactly as-is and only Metro rows get the finer display. "1/2", not the Latin-1
+// vulgar-fraction glyph (0xBD): this board's custom fonts only carry the glyphs UK rail signage ever
+// needed, not the full Latin-1 set, so a literal "1/2" is what's guaranteed to render in any of them -
+// same reasoning as sTogCountdownText()'s own floor text.
+void metroCountdownText(const rdService &svc, char *out, size_t outSize) {
+  const char *timeStr = isDigit(svc.etd[0]) ? svc.etd : svc.sTime;
+  int h=0,m=0;
+  sscanf(timeStr,"%d:%d",&h,&m);
+  // + svc.sSec: Metro departure times are second-precise (e.g. 08:58:39) - without it every
+  // countdown would be off by up to a minute, which matters at half-minute granularity.
+  long deltaSec = (long)(h*3600+m*60+svc.sSec) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+  if (deltaSec < -3600) deltaSec += 86400;   // rolled over past midnight - tomorrow's early departure, not overdue
+  // Nearest 30s step (e.g. 5 steps = 2.5 minutes). Steps of 0 or 1 (i.e. anything up to ~45s) floor
+  // to "1/2 min" - including a slightly negative deltaSec, so a service already at/just past its
+  // scheduled time never shows "0 min" or a negative value, holding there until the departed-service
+  // animation clears the row (see its trigger in departureBoardLoop()).
+  long halfMinuteSteps = (deltaSec + 15) / 30;
+  if (halfMinuteSteps <= 1) {
+    strlcpy(out,"1/2 min",outSize);
+  } else if (halfMinuteSteps % 2 == 0) {
+    snprintf(out,outSize,"%ld min",halfMinuteSteps/2);
+  } else {
+    snprintf(out,outSize,"%ld 1/2 min",halfMinuteSteps/2);
+  }
+}
+
 // Reads one glyph's tight ink box (width, height, x/y-offset) straight from the currently active
 // font's raw data - same low-level decode as getGlyphYOffset() above, extended to also capture
 // width and x-offset. u8g2's own u8g2_GetGlyphWidth()/getStrWidth() only return the ADVANCE width
 // (the cursor step, which includes each character's own built-in side-bearing/spacing) - centring
-// the badge letter by that number is why it looked centred for some letters and not others: how
-// much of the advance width is "real ink" vs spacing differs per letter, so centring the box instead
-// of the box's ink doesn't put the same letters in the same visual place.
+// a badge letter (see drawLineBadge() below) by that number is why it looked centred for some
+// letters and not others: how much of the advance width is "real ink" vs spacing differs per
+// letter, so centring the box instead of the box's ink doesn't put the same letters in the same
+// visual place.
 static bool getGlyphBox(u8g2_t *u, uint16_t encoding, int8_t *outW, int8_t *outH, int8_t *outXoff, int8_t *outYoff) {
   const uint8_t *glyphData = u8g2_font_get_glyph_data(u, encoding);
   if (!glyphData) return false;
@@ -2097,7 +2209,12 @@ static bool getGlyphBox(u8g2_t *u, uint16_t encoding, int8_t *outW, int8_t *outH
   return true;
 }
 
-int drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
+// Shared by drawSTogBadge() (cornerRadius=1, a lightly-rounded square/pill) and drawMetroBadge()
+// (cornerRadius=size/2, a true circle/stadium) - everything except the corner radius passed to
+// drawRBox() at the end is identical between the two styles, including all the ink-centring maths
+// below (that doesn't care about the shape it's centred inside). See drawSTogBadge()'s own comment
+// for the full reasoning behind each step.
+int drawLineBadge(int x, int y, int size, const char *letter, const uint8_t *font, int cornerRadius) {
   const uint8_t *prevFont = u8g2.getU8g2()->font;
   u8g2.setFont(font);
   u8g2_t *u = u8g2.getU8g2();
@@ -2139,15 +2256,23 @@ int drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *fon
   const int hPad = 2;
   int inkWidth = any ? inkRight-inkLeft : 0;
   int width = size;
-  if (inkWidth+hPad*2 > width) width = inkWidth+hPad*2;
+  // cornerRadius<0 means "true circle" (see drawMetroBadge()): the badge must stay exactly size x
+  // size, so it never widens - the caller picks a font small enough for the label to fit inside.
+  if (cornerRadius >= 0 && inkWidth+hPad*2 > width) width = inkWidth+hPad*2;
 
   // u8g2's box/corner drawing is strictly 1-bit here - drawRBox()'s corners come from drawDisc(),
   // which (like every u8g2 primitive) writes each pixel fully on or fully off, never partial/dimmed
-  // - so "dim" pixels can't come from the fill itself. At r=2 on a badge this small (9-12px), the
-  // quarter-circle notch cut from each corner is a large enough fraction of the square that it can
-  // read as gaps in the fill rather than rounding. r=1 keeps a visibly rounded (not sharp-square)
-  // corner while leaving the fill itself looking solid.
-  u8g2.drawRBox(x,y,width,size,1);
+  // - so "dim" pixels can't come from the fill itself. Clamped to half the shorter side (u8g2's own
+  // requirement for drawRBox's radius) so a caller can't request something u8g2 would mis-render.
+  if (cornerRadius < 0) {
+    // drawDisc(cx,cy,r) covers a (2r+1)-pixel diameter around the centre pixel, so an odd size is a
+    // perfectly symmetric circle (an even one would be off-centre by half a pixel).
+    u8g2.drawDisc(x+size/2,y+size/2,size/2,U8G2_DRAW_ALL);
+  } else {
+    int maxRadius = (width<size?width:size)/2;
+    int radius = cornerRadius>maxRadius ? maxRadius : cornerRadius;
+    u8g2.drawRBox(x,y,width,size,radius);
+  }
 
   int tx = any ? x + (width-inkWidth)/2 - inkLeft : x;
   int ty = any ? y + (size-(inkBottom-inkTop))/2 - inkTop : y;
@@ -2156,6 +2281,34 @@ int drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *fon
   u8g2.setDrawColor(1);
   u8g2.setFont(prevFont);
   return width;
+}
+
+// S-tog line-letter badge: a small filled rounded box with the line letter "punched out" in the
+// background colour (e.g. a solid square with a black "A" knocked out of the white fill), matching
+// the roundel look of Copenhagen's real S-tog line signage. size is the height, and also the width
+// for ordinary single-letter lines (A, B, C, E, F, H), which stay perfectly square. A label whose ink
+// genuinely doesn't fit that square - currently only the Bx line - widens the badge into a small
+// rounded rectangle instead, matching how Copenhagen's own signage shows Bx as a wider pill rather
+// than squeezing two letters into the same square as the single-letter lines. Returns the badge's
+// actual drawn width, since callers can no longer assume it's always `size`. Saves/restores whatever
+// font was active on entry, so it can be called safely from mid-draw in either drawPrimaryService()
+// or drawServiceLine(). r=1 keeps a visibly rounded (not sharp-square) corner while leaving the fill
+// itself looking solid - see drawLineBadge()'s own comment on why a larger radius reads as gaps at
+// this size.
+int drawSTogBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
+  return drawLineBadge(x,y,size,letter,font,1);
+}
+
+// Copenhagen Metro line badge: same construction as drawSTogBadge(), but a true circle rather than a
+// lightly-rounded square, matching real Metro signage's round M1/M2/M3/M4 roundels. size should be
+// odd (13 on the primary row, 9 on the secondary rows) for a symmetric disc, and the caller's font
+// small enough that "M1".."M4" fits inside it - measured from the actual font data: u8g2_font_5x7_tf
+// gives a 9x6px label (fits 13), u8g2_font_4x6_tf gives 7x5px (fits 9). The badge never widens. Colour-coding each line (M1 green, M2 yellow, M3
+// red, M4 blue on the real signage) isn't possible here - this display is monochrome, not RGB - so
+// every line gets the same filled-circle treatment regardless of which one it is; the "M1".."M4" text
+// itself is what tells them apart.
+int drawMetroBadge(int x, int y, int size, const char *letter, const uint8_t *font) {
+  return drawLineBadge(x,y,size,letter,font,-1);
 }
 
 // Draw the primary service line
@@ -2174,14 +2327,19 @@ void drawPrimaryService(bool showVia) {
   // next redraw, rather than leaving a ghost if the next value drawn doesn't reach that high.
   blankArea(0,LINE1-2,256,LINE2-LINE1+2);
   bool sTogStyle = useSTogStyle(0);
-  if (sTogStyle) {
-    int badgeW = drawSTogBadge(0,LINE1-1,12,station.service[0].via[0]?station.service[0].via:"?",u8g2_font_6x13B_tf);
+  bool metroStyle = useMetroStyle(0);
+  bool badgeStyle = sTogStyle || metroStyle;
+  if (badgeStyle) {
+    const char *label = station.service[0].via[0]?station.service[0].via:"?";
+    int badgeW = metroStyle ? drawMetroBadge(0,LINE1-1,13,label,u8g2_font_5x7_tf)
+                             : drawSTogBadge(0,LINE1-1,12,label,u8g2_font_6x13B_tf);
     destPos = badgeW+4;
   } else {
     destPos = u8g2.drawStr(0,LINE1-1,station.service[0].sTime) + 6;
   }
-  if (sTogStyle && !station.service[0].isCancelled) {
-    sTogCountdownText(station.service[0],etd,sizeof(etd));
+  if (badgeStyle && !station.service[0].isCancelled) {
+    if (metroStyle) metroCountdownText(station.service[0],etd,sizeof(etd));
+    else sTogCountdownText(station.service[0],etd,sizeof(etd));
   } else if (isDigit(station.service[0].etd[0])) sprintf(etd,"Forventet %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
   int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
@@ -2195,10 +2353,11 @@ void drawPrimaryService(bool showVia) {
     spaceAvailable-=(platWidth+7);
   }
 
-  // sTogStyle rows already show the line letter permanently in the badge, so the via-toggle (which
-  // for DK Rail shows the service's line/train-number label, e.g. "A" or "ICL 50018") would just be
-  // redundant - always show the destination for those rows regardless of showVia.
-  if (showVia && !sTogStyle) strcpy(clipDestination,station.service[0].via);
+  // badgeStyle rows (S-tog or Metro) already show the line letter permanently in the badge, so the
+  // via-toggle (which for DK Rail shows the service's line/train-number label, e.g. "A" or
+  // "ICL 50018") would just be redundant - always show the destination for those rows regardless of
+  // showVia.
+  if (showVia && !badgeStyle) strcpy(clipDestination,station.service[0].via);
   else {
     strcpy(clipDestination,station.service[0].destination);
     if (station.service[0].serviceType == BUS) strcat(clipDestination," ~");  // Add bus icon to destination
@@ -2235,7 +2394,9 @@ void drawServiceLine(int line, int y) {
 
   if (line<station.numServices) {
     bool sTogStyle = useSTogStyle(line);
-    if (sTogStyle) {
+    bool metroStyle = useMetroStyle(line);
+    bool badgeStyle = sTogStyle || metroStyle;
+    if (badgeStyle) {
       // Badge replaces the scheduled time (kept alongside the ordinal, if shown, so it's still
       // clear this is the 2nd/3rd upcoming departure) - see the matching comment in
       // drawPrimaryService() for why the badge/countdown style only applies per-row.
@@ -2244,7 +2405,9 @@ void drawServiceLine(int line, int y) {
         u8g2.drawStr(0,y-1,ordinal);
         badgeX = 21;
       }
-      int badgeW = drawSTogBadge(badgeX,y-1,9,station.service[line].via[0]?station.service[line].via:"?",u8g2_font_6x10_tf);
+      const char *label = station.service[line].via[0]?station.service[line].via:"?";
+      int badgeW = metroStyle ? drawMetroBadge(badgeX,y-1,9,label,u8g2_font_4x6_tf)
+                               : drawSTogBadge(badgeX,y-1,9,label,u8g2_font_6x10_tf);
       destPos = badgeX+badgeW+4;
     } else if (hideOrdinals) {
       destPos = u8g2.drawStr(0,y-1,station.service[line].sTime) + 6;
@@ -2253,8 +2416,9 @@ void drawServiceLine(int line, int y) {
       destPos = u8g2.drawStr(21,y-1,station.service[line].sTime) + 25;
     }
     char etd[16];
-    if (sTogStyle && !station.service[line].isCancelled) {
-      sTogCountdownText(station.service[line],etd,sizeof(etd));
+    if (badgeStyle && !station.service[line].isCancelled) {
+      if (metroStyle) metroCountdownText(station.service[line],etd,sizeof(etd));
+      else sTogCountdownText(station.service[line],etd,sizeof(etd));
     } else if (isDigit(station.service[line].etd[0])) sprintf(etd,"Forventet %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
     int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
@@ -2278,7 +2442,7 @@ void drawServiceLine(int line, int y) {
       centreText(weatherMsg,y-1);
     }
     // No attribution shown here - Rejseplanen has no attribution requirement, and this board is
-    // Danish-only (see MODE_DKRAIL/MODE_STOG, the only two modes that ever draw this row).
+    // Danish-only (see MODE_DKRAIL/MODE_STOG/MODE_METRO, the only modes that ever draw this row).
   }
 }
 
@@ -2330,29 +2494,17 @@ void buildServiceMessages() {
       sprintf(line2[numMessages],"Stopper ved: %s",station.calling);
       numMessages++;
     }
-    // Rejseplanen's client leaves station.origin blank whenever the requested stop IS the
-    // service's origin, so that's a direct signal - no need to compare names. But it's ALSO
-    // blank whenever the calling-at fetch simply hasn't succeeded yet (still fetching, or the
-    // last attempt failed) - callingKnown distinguishes "confirmed this service starts here"
-    // from "don't actually know yet", so a slow/failed fetch no longer gets shown as a false
-    // "starts here" (see rdStation::callingKnown's own comment for the full reasoning).
-    if (station.callingKnown && !station.origin[0]) {
-      // Service originates at this station. opco is the operator name straight from
-      // Rejseplanen (e.g. "DSB", "DSB S-tog") - some of those already contain "tog" (S-tog's
-      // does), so appending "-tog" unconditionally produced "Dette DSB S-tog-tog starter her."
-      // Only add the suffix when opco doesn't already have it.
-      if (station.service[0].opco[0] && !containsCaseInsensitive(station.service[0].opco,"tog")) {
-        sprintf(line2[numMessages],"Dette %s-tog starter her.",station.service[0].opco);
-      } else if (station.service[0].opco[0]) {
-        sprintf(line2[numMessages],"Dette %s starter her.",station.service[0].opco);
-      } else {
-        strcpy(line2[numMessages],"Dette tog starter her.");
-      }
+    if (station.splitInfo[0]) {
+      // "Fra Fredericia St. køres som ICL 31 mod Aalborg Lufthavn St." - a train that splits into
+      // separate portions partway along its route (see rejseplanenClient's rjDirectionSegment for
+      // how this is worked out) - shown as its own message right after "Stopper ved" per user request,
+      // not folded into the calling-at text itself.
+      strcpy(line2[numMessages],station.splitInfo);
       numMessages++;
     }
-    // No "This is the X service from Y."/"This service originated at Y." message when the
-    // service originates elsewhere any more (removed per user request - it didn't carry any
-    // actionable information for a departure board).
+    // No "This service starts here"/"This service originated at Y." message any more (removed
+    // per user request - it didn't carry any actionable information for a departure board, and
+    // was taking up a message slot that "Stopper ved" would otherwise get more airtime in).
   }
 }
 
@@ -2467,9 +2619,11 @@ void updateRailDepartures() {
     // wins over trying to salvage the pre-fetch here - the next cycle will just re-pre-fetch normally.
     station.calling[0] = '\0';
     station.origin[0] = '\0';
+    station.splitInfo[0] = '\0';
     station.callingKnown = false;
     station.nextCalling[0] = '\0';
     station.nextOrigin[0] = '\0';
+    station.nextSplitInfo[0] = '\0';
     station.nextCallingKnown = false;
   }
   lastDataLoadTime = millis();
@@ -2932,6 +3086,10 @@ String getResultCodeText(int resultCode) {
   }
 }
 
+// Forward declaration - defined further down (alongside nextFetchDelay(), which uses it too), needed
+// here to report the current paced interval below.
+unsigned long computePacedIntervalMs();
+
 // Send some useful system & station information to the browser
 void handleInfo(AsyncWebServerRequest *request) {
   unsigned long uptime = millis();
@@ -2956,6 +3114,12 @@ void handleInfo(AsyncWebServerRequest *request) {
 
   message+="\nCurrent location code: " + String(locationCode) + "\nCurrent location name: " + String(locationName) + "\nSuccessful: " + String(dataLoadSuccess) + "\nFailures: " + String(dataLoadFailure) + "\nTime since last data load: " + String((int)((millis()-lastDataLoadTime)/1000)) + " seconds";
   if (dataLoadFailure) message+="\nTime since last failure: " + String((int)((millis()-lastLoadFailure)/1000)) + " seconds";
+  if (apiBudgetPacingEnabled) {
+    unsigned long pacedMs = computePacedIntervalMs();
+    unsigned long effectiveMs = pacedMs > (unsigned long)apiRefreshRate ? pacedMs : (unsigned long)apiRefreshRate;
+    message+="\nAPI usage this month: " + String(apiUsageThisMonth) + " / " + String(apiMonthlyBudget) +
+      " (current fetch interval: " + String((int)(effectiveMs/1000)) + "s)";
+  }
   message+="\nLast Result: ";
   message+=String(jsonKeyBuffer.lastResultMessage);
   message+="\nUpdate result code: ";
@@ -3268,7 +3432,7 @@ void departureBoardLoop() {
         // slots occupy indices numServices .. numServices+extraSlots-1, so wrap as soon as
         // line3Service would reach numServices+extraSlots (>=, not >, which let one dead slot
         // through regardless of extraSlots - the actual cause of the still-visible gap).
-        int extraSlots = (weatherMsg[0]?1:0) + ((boardMode!=MODE_DKRAIL && boardMode!=MODE_STOG)?1:0);
+        int extraSlots = (weatherMsg[0]?1:0) + ((boardMode!=MODE_DKRAIL && boardMode!=MODE_STOG && boardMode!=MODE_METRO)?1:0);
         if (line3Service>=station.numServices+extraSlots) line3Service=(noScrolling && station.numServices>1) ? 2:1;  // First 'other' service
       } else {
         if (weatherMsg[0] && line3Service>1) line3Service=0;
@@ -3309,7 +3473,8 @@ void departureBoardLoop() {
         // The København H S-tog "Stopper ved" list can run to a dozen-plus stops even with the
         // times dropped (see the omitCallingTimes comment in rejseplanenClient.cpp) - scroll it
         // noticeably faster than every other message so it doesn't dominate the display for ages.
-        scrollStopsXpos -= (isCallingMessage(line2[currentMessage]) && useSTogStyle(0)) ? 2 : 1;
+        // Metro's lists are just as long (M1 to Vestamager is 20+ stops), so same speed there.
+        scrollStopsXpos -= (isCallingMessage(line2[currentMessage]) && (useSTogStyle(0) || useMetroStyle(0))) ? 2 : 1;
         if (scrollStopsXpos < -scrollStopsLength+msgMargin) {
           isScrollingStops=false;
           timer=millis()+500;  // pause before next message
@@ -3317,6 +3482,21 @@ void departureBoardLoop() {
       }
     }
     u8g2.setMaxClipWindow();
+    // Push this row's own redraw explicitly, scoped to exactly the rows it just touched
+    // (msgLine-1 to msgLine+9, matching the clip window above), rather than relying on some
+    // OTHER row's own updateDisplayArea call to incidentally cover it. LINE1's own push
+    // (u8g2.updateDisplayArea(0,1,32,3), see the ping-pong scroll block below) only reaches
+    // down to pixel row 32 - for the default msgLine==LINE2 (28), this row runs to row 37, so
+    // that push was only ever flushing this row's TOP ~5px, never its bottom ~5px. When LINE1
+    // was ALSO actively scrolling (pushing that partial rectangle on its own fast ~25ms cadence)
+    // at the same time as this row, the two ended up flushed to the panel out of step with each
+    // other - the top slice of this text one tick ahead/behind the bottom slice - which shows up
+    // as a horizontal shear ("cursive"-looking) distortion. Rounding out to whole 8px tiles (u8x8
+    // addresses rows in 8px bands - see u8x8_d_ssd1322.c's DRAW_TILE handler) so partial tiles are
+    // never left half-flushed.
+    int msgTileY = (msgLine-1)/8;
+    int msgTileH = (msgLine+16)/8 - msgTileY; // ceil((msgLine+9)/8) - msgTileY
+    u8g2.updateDisplayArea(0,msgTileY,32,msgTileH);
   }
 
   if (isScrollingService && millis()>serviceTimer && !isSleeping && !noServiceClockIsActive) {
@@ -3381,13 +3561,13 @@ void departureBoardLoop() {
     const char *effTime = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
     int h=0,m=0;
     sscanf(effTime,"%d:%d",&h,&m);
-    long deltaSec = (long)(h*3600+m*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+    long deltaSec = (long)(h*3600+m*60+(useMetroStyle(0)?station.service[0].sSec:0)) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
     if (deltaSec < -3600) deltaSec += 86400; // midnight rollover - actually tomorrow's early departure, not overdue
     char fingerprint[320];
     snprintf(fingerprint,sizeof(fingerprint),"%s|%s|%s",station.service[0].sTime,station.service[0].destination,station.service[0].serviceID);
     // S-tog runs frequently enough during busy periods that leaving a departed service up for the
     // usual full minute makes the board feel stale - clear it after 15 seconds there instead.
-    long departedThresholdSec = useSTogStyle(0) ? -15 : -60;
+    long departedThresholdSec = (useSTogStyle(0) || useMetroStyle(0)) ? -15 : -60;
     // A service creeping past the threshold doesn't necessarily mean it's actually departed - a
     // delay that grows a minute at a time (common) means the LAST fetch's rtTime estimate can go
     // stale before the next one lands, and the board's clock catching up to that stale estimate
@@ -3446,8 +3626,12 @@ void departureBoardLoop() {
       // happens. Checked first, before the older pre-fetch consumption below, since it doesn't
       // depend on timing (pre-fetch only helps if it happened to land before THIS promotion; the
       // cache helps as soon as this line+direction has EVER been seen, on any earlier departure).
-      if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+      if ((boardMode == MODE_STOG || boardMode == MODE_METRO) && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
         station.callingKnown = true;
+        // S-tog services never split (fixed suburban lines) - the cache only
+        // ever holds calling/origin, never splitInfo, so explicitly clear it here rather than risk
+        // it lingering from whatever the previous primary (a genuinely different service) had.
+        station.splitInfo[0] = '\0';
       // Whatever's now primary was sitting in position [1] a moment ago, and rejseplanenClient
       // pre-fetches calling-at for that position ahead of time precisely for this moment (see
       // rdStation::nextCalling and fetchDepartures()) - if it landed in time, use it immediately
@@ -3457,14 +3641,17 @@ void departureBoardLoop() {
       } else if (station.nextCallingKnown) {
         strlcpy(station.calling, station.nextCalling, sizeof(station.calling));
         strlcpy(station.origin, station.nextOrigin, sizeof(station.origin));
+        strlcpy(station.splitInfo, station.nextSplitInfo, sizeof(station.splitInfo));
         station.callingKnown = true;
       } else {
         station.calling[0] = '\0';
         station.origin[0] = '\0';
+        station.splitInfo[0] = '\0';
         station.callingKnown = false;
       }
       station.nextCalling[0] = '\0';
       station.nextOrigin[0] = '\0';
+      station.nextSplitInfo[0] = '\0';
       station.nextCallingKnown = false;
       // If whatever's now primary ALSO already passed its own departed-threshold, it left too close
       // behind the one that just animated away to be worth a separate animation of its own - S-tog
@@ -3477,9 +3664,9 @@ void departureBoardLoop() {
         const char *effTime2 = isDigit(station.service[0].etd[0]) ? station.service[0].etd : station.service[0].sTime;
         int h2=0,m2=0;
         sscanf(effTime2,"%d:%d",&h2,&m2);
-        long deltaSec2 = (long)(h2*3600+m2*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+        long deltaSec2 = (long)(h2*3600+m2*60+(useMetroStyle(0)?station.service[0].sSec:0)) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
         if (deltaSec2 < -3600) deltaSec2 += 86400;
-        long departedThresholdSec2 = useSTogStyle(0) ? -15 : -60;
+        long departedThresholdSec2 = (useSTogStyle(0) || useMetroStyle(0)) ? -15 : -60;
         if (deltaSec2 > departedThresholdSec2) break; // still upcoming - this is the new primary
         char fingerprint2[320];
         snprintf(fingerprint2,sizeof(fingerprint2),"%s|%s|%s",station.service[0].sTime,station.service[0].destination,station.service[0].serviceID);
@@ -3487,15 +3674,17 @@ void departureBoardLoop() {
         promoteNextService();
         // Whatever calling-at was just consumed/discarded above described the service this loop just
         // skipped past, not whichever one it lands on next - invalidate it each time round so a
-        // multi-departure cluster can never show a skipped train's stale stops. For S-tog, try the
-        // line+direction cache first (same reasoning as the single-promotion case above) before
+        // multi-departure cluster can never show a skipped train's stale stops. For S-tog, try
+        // the line+direction cache first (same reasoning as the single-promotion case above) before
         // falling back to blank - a back-to-back cluster is exactly the case with no pre-fetch
         // coverage at all beyond position [1], so the cache matters most right here.
-        if (boardMode == MODE_STOG && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+        if ((boardMode == MODE_STOG || boardMode == MODE_METRO) && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
           station.callingKnown = true;
+          station.splitInfo[0] = '\0';  // S-tog never splits - see the single-promotion case above
         } else {
           station.calling[0] = '\0';
           station.origin[0] = '\0';
+          station.splitInfo[0] = '\0';
           station.callingKnown = false;
         }
       }
@@ -3529,7 +3718,11 @@ void departureBoardLoop() {
       // apply here (instead of an urgent fetch immediately after every single departure) means fewer
       // fetch attempts get bunched up right after the display was just busy animating, which was the
       // most likely reason S-tog - departing far more often than Tog - saw fetches fail more often.
-      if (!station.callingKnown) nextDataUpdate = millis();
+      // Never for Metro: a departure whose line+direction isn't in the lookup table (or whose trip
+      // lookup keeps failing) leaves callingKnown false indefinitely, and this would then fire a full
+      // API request after EVERY departure - Metro runs every few minutes, so that would burn quota
+      // fast. Metro just waits for its normal schedule instead.
+      if (!station.callingKnown && boardMode != MODE_METRO) nextDataUpdate = millis();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
@@ -4085,6 +4278,132 @@ void odenseBusLoop() {
   }
 }
 
+// Number of real calendar days in year/month0 (month0: 0=January, matching struct tm's tm_mon) -
+// only needed to size the "seconds left in this month" calculation below, so leap Februaries are the
+// only case that actually matters here.
+static int daysInMonth(int year, int month0) {
+  static const int dim[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+  if (month0 == 1) { // February
+    bool leap = (year%4==0 && (year%100!=0 || year%400==0));
+    return leap ? 29 : 28;
+  }
+  return dim[month0];
+}
+
+// Loads apiUsageThisMonth from "/apiusage.json" if it exists AND covers the calendar month/year
+// we're in right now - a reboot partway through the month resumes counting where it left off, but
+// one after the month has already rolled over starts fresh at 0 (the file's stale count is simply
+// never read). Called lazily, once, the first time updateApiUsageTracking() ever runs (see
+// apiUsageYear's own "-1 = not yet loaded" comment) rather than from setup() - by the time the very
+// first fetch cycle completes, NTP has long since set timeinfo, so there's no ordering hazard to
+// managing this alongside the rest of loadConfig()'s boot sequence.
+void loadApiUsage() {
+  apiUsageYear = timeinfo.tm_year+1900;
+  apiUsageMonth = timeinfo.tm_mon;
+  apiUsageThisMonth = 0;
+  if (LittleFS.exists("/apiusage.json")) {
+    JsonDocument doc;
+    if (!deserializeJson(doc, loadFile("/apiusage.json"))) {
+      if (doc["year"].is<int>() && doc["month"].is<int>() &&
+          doc["year"].as<int>()==apiUsageYear && doc["month"].as<int>()==apiUsageMonth) {
+        apiUsageThisMonth = doc["count"] | 0;
+      }
+    }
+  }
+}
+
+void saveApiUsage() {
+  JsonDocument doc;
+  doc["year"] = apiUsageYear;
+  doc["month"] = apiUsageMonth;
+  doc["count"] = apiUsageThisMonth;
+  String out;
+  serializeJson(doc, out);
+  saveFile("/apiusage.json", out);
+  apiUsageLastSaveMillis = millis();
+}
+
+// Rolls the usage counter over on a genuine calendar-month change (detected purely from the board's
+// own NTP-synced clock - Rejseplanen's API gives no usage/reset signal of its own, see this whole
+// feature's top-level comment by apiBudgetPacingEnabled's declaration), adds whatever new requests
+// rejseplanenClient has sent since this last ran, and persists the running total - but only at most
+// once a minute, regardless of how often fetches happen, so a month of pacing (however slow) doesn't
+// turn into a month of writing this same tiny file over and over. Losing the last <1 minute of
+// increments to an unclean reboot only makes pacing marginally more conservative for one cycle
+// afterwards, never risks the real total drifting over budget.
+//
+// Reads timeinfo without taking any lock, even though this runs on Core 0 (fetchDeparturesTask - see
+// its own pinning) while timeinfo is only ever written from Core 1's loop(): every field read here is
+// a single plain int, the write side updates it at most 10x/second, and this runs at most once every
+// tens of seconds - the odds of observing a genuinely torn struct are tiny, and the entire feature
+// only cares about minute/day-scale accuracy, so even that rare case is harmless. Not worth a mutex
+// for the same reason nothing else in this file bothers locking timeinfo either.
+void updateApiUsageTracking() {
+  if (apiUsageYear == -1) {
+    loadApiUsage();
+    apiUsageLastSeenCount = rejseplanenData.getApiRequestCount();
+    return; // baseline just established - nothing to diff against yet this cycle
+  }
+  if (timeinfo.tm_year+1900 != apiUsageYear || timeinfo.tm_mon != apiUsageMonth) {
+    apiUsageYear = timeinfo.tm_year+1900;
+    apiUsageMonth = timeinfo.tm_mon;
+    apiUsageThisMonth = 0;
+  }
+  unsigned long currentCount = rejseplanenData.getApiRequestCount();
+  unsigned long delta = currentCount - apiUsageLastSeenCount;
+  apiUsageLastSeenCount = currentCount;
+  apiUsageThisMonth += delta;
+  if (delta && millis()-apiUsageLastSaveMillis > 60000) saveApiUsage();
+}
+
+// Returns the interval nextFetchDelay() should use to keep this month's Rejseplanen usage under
+// apiMonthlyBudget by month-end - 0 when pacing shouldn't override anything (disabled, or no budget
+// configured), which nextFetchDelay() treats as "just use apiRefreshRate" unpaced. Recomputed fresh
+// every call from the current usage/date rather than following a precomputed schedule, so it's
+// automatically self-correcting: a burst of calling-at fetches (DK Rail/Metro have no line+direction
+// cache to smooth those out the way S-tog's does) that eats extra budget this cycle makes the very
+// next call here stretch further out on its own, with no separate reconciliation logic needed.
+unsigned long computePacedIntervalMs() {
+  if (!apiBudgetPacingEnabled || apiMonthlyBudget==0) return 0;
+  // Pace to 95%, not 100%, of the configured budget - the reserved 5% is headroom for exactly that
+  // kind of unpredictable calling-at overhead, so it can't tip the real total over whatever number
+  // Rejseplanen actually enforces.
+  long remaining = (long)(apiMonthlyBudget*95/100) - (long)apiUsageThisMonth;
+  if (remaining <= 0) return (unsigned long)MAX_PACED_INTERVAL_SEC * 1000UL; // budget's gone - hold at the slowest pace until the month rolls over
+  int dim = daysInMonth(timeinfo.tm_year+1900, timeinfo.tm_mon);
+  long secondsElapsedToday = timeinfo.tm_hour*3600L + timeinfo.tm_min*60L + timeinfo.tm_sec;
+  long secondsRemainingInMonth = (long)(dim - timeinfo.tm_mday)*86400L + (86400L - secondsElapsedToday);
+  if (secondsRemainingInMonth < 60) secondsRemainingInMonth = 60; // guard the divide right at month-end
+  long targetIntervalSec = secondsRemainingInMonth / remaining;
+  if (targetIntervalSec < MIN_PACED_INTERVAL_SEC) targetIntervalSec = MIN_PACED_INTERVAL_SEC;
+  if (targetIntervalSec > MAX_PACED_INTERVAL_SEC) targetIntervalSec = MAX_PACED_INTERVAL_SEC;
+  return (unsigned long)targetIntervalSec * 1000UL;
+}
+
+// How long to wait before the NEXT scheduled fetch attempt, called right after this one's result
+// is known. Normally the full configured apiRefreshRate - but if this attempt just failed (a
+// network/API hiccup, not a real "nothing changed" result) AND there's currently no good data on
+// screen (station.numServices==0), waiting out the full interval before trying again leaves the
+// board visibly empty for up to that whole time. The numServices==0 case isn't just "board never
+// loaded yet" - promoteNextService() (see its own comment) also zeroes it locally when a departed
+// service's replacement isn't known yet, normally self-healing within moments via its own immediate
+// refetch trigger - but if THAT retry then also hits a transient hiccup, without this it would fall
+// straight back to the slow, minutes-apart cadence and sit there looking broken for a full cycle.
+// Retrying quickly instead means a transient failure usually clears within a handful of seconds. This
+// fast-retry path deliberately ignores budget pacing - it's rare and self-limiting (either the board
+// recovers in a few cycles or falls back to the paths below), and overriding even this to protect the
+// budget would risk leaving the board looking genuinely broken for a long stretch right when pacing
+// is tightest (late in the month, budget nearly spent).
+unsigned long nextFetchDelay() {
+  updateApiUsageTracking();
+  bool isFailure = (lastUpdateResult==UPD_HTTP_ERROR || lastUpdateResult==UPD_TIMEOUT ||
+                     lastUpdateResult==UPD_NO_RESPONSE || lastUpdateResult==UPD_DATA_ERROR ||
+                     lastUpdateResult==UPD_INCOMPLETE);
+  if (isFailure && station.numServices==0) return 5000UL;
+  unsigned long pacedMs = computePacedIntervalMs();
+  return pacedMs > (unsigned long)apiRefreshRate ? pacedMs : (unsigned long)apiRefreshRate;
+}
+
 // The Core 0 Background Task
 void fetchDeparturesTask(void *pvParameters) {
   while(true) {
@@ -4098,15 +4417,15 @@ void fetchDeparturesTask(void *pvParameters) {
         switch (boardMode) {
           case MODE_DKRAIL:
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,dkProducts,true,dkCallingStopId,nrTimeOffset);
-            nextDataUpdate = millis()+apiRefreshRate;
+            nextDataUpdate = millis()+nextFetchDelay();
             break;
           case MODE_LETBANE:
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,LETBANE_PRODUCTS,false,"",0);
-            nextDataUpdate = millis()+apiRefreshRate;
+            nextDataUpdate = millis()+nextFetchDelay();
             break;
           case MODE_DKBUS:
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,MAXBOARDSERVICES,DKBUS_PRODUCTS,false,"",0);
-            nextDataUpdate = millis()+apiRefreshRate;
+            nextDataUpdate = millis()+nextFetchDelay();
             break;
           case MODE_STOG:
             // Own dedicated board - always S-tog-only (no product checkboxes to read), and no
@@ -4117,7 +4436,20 @@ void fetchDeparturesTask(void *pvParameters) {
             // known for a combo it's reused for every future departure on it with no fetch at all.
             // See rejseplanenClient.h's LineDirCallingEntry for why this is scoped to S-tog only.
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,STOG_PRODUCTS,true,"",nrTimeOffset,true);
-            nextDataUpdate = millis()+apiRefreshRate;
+            nextDataUpdate = millis()+nextFetchDelay();
+            break;
+          case MODE_METRO:
+            // Own dedicated board, same shape as MODE_STOG above: no product checkboxes, no
+            // calling-direction filter. Calling-at works differently for Metro than anywhere else -
+            // the departure board gives Metro an EMPTY journey reference, so rejseplanenClient looks
+            // one up through the trip planner first (see getCallingForService()) - but that costs two
+            // requests per line+direction combo, which is exactly what the line+direction cache is
+            // for: useLineDirCache=true, same as S-tog, so each combo is looked up about once a day
+            // however often it departs. metroOnly=true makes finaliseDepartureRecord() discard
+            // anything that isn't actually a Metro service, as a guard against a stop id shared with
+            // other products.
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,METRO_PRODUCTS,true,"",nrTimeOffset,true,true);
+            nextDataUpdate = millis()+nextFetchDelay();
             break;
         }
         fetchComplete = true;
@@ -4237,7 +4569,7 @@ void setup(void) {
       delete body; // Clean up memory
       request->_tempObject = nullptr;
 
-      if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || request->hasParam("reboot")) {
+      if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet) || request->hasParam("reboot")) {
         // First time setup or base config change, we need a full reboot
         sendResponse(200,"Configuration saved. The Departures Board will now restart.",request);
         restartTimer.once(1, []() { ESP.restart(); });
@@ -4288,7 +4620,7 @@ void setup(void) {
         // Load/Update the API Keys in memory
         loadApiKeys();
         // If all location codes are blank we're in the setup process. If not, the keys have been changed so just reboot.
-        if (!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) {
+        if (!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet) {
           sendResponse(200,msg,request);
           writeDefaultConfig();
           showSetupCrsHelpScreen();
@@ -4417,7 +4749,7 @@ void setup(void) {
   }
   checkPostWebUpgrade();
   // First time configuration?
-  if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet) || !rejseplanenKey[0]) {
+  if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet) || !rejseplanenKey[0]) {
     if (!apiKeys) showSetupKeysHelpScreen();
     else showSetupCrsHelpScreen();
     // First time setup mode will exit with a reboot, so just loop here forever
@@ -4490,6 +4822,9 @@ void setup(void) {
       startupProgressPercent=70;
   } else if (boardMode == MODE_STOG) {
       progressBar("Initialiserer S-tog",70);
+      startupProgressPercent=70;
+  } else if (boardMode == MODE_METRO) {
+      progressBar("Initialiserer Metro",70);
       startupProgressPercent=70;
   }
 }
@@ -4578,6 +4913,10 @@ void loop(void) {
       break;
 
     case MODE_STOG:
+      departureBoardLoop();
+      break;
+
+    case MODE_METRO:
       departureBoardLoop();
       break;
   }

@@ -41,6 +41,8 @@ bool rejseplanenClient::compareTimes(const rdiService& a, const rdiService& b) {
     return strcmp(a.destination, b.destination) < 0;
 }
 
+static void stripMetroSuffix(char *name);   // defined with the Metro helpers further down
+
 // Truncate a Rejseplanen "HH:MM:SS" time string down to "HH:MM" in place.
 static void truncateSeconds(char* t) {
     if (t[0] && strlen(t) > 5 && t[2] == ':' && t[5] == ':') t[5] = '\0';
@@ -153,6 +155,27 @@ void rejseplanenClient::finaliseDepartureRecord() {
     // "Bus" for anything bus-shaped, so match on that instead.
     svc.serviceType = containsCaseInsensitive(raw.catOut,"bus") ? BUS : TRAIN;
     svc.isSTog = containsCaseInsensitive(raw.catOut,"S-Tog");
+    // Confirmed against the live API: Copenhagen Metro departures report catOut "MET" (catCode 10,
+    // product bit 1024), Departure.name "Metro M1".."Metro M4", and operator "Metroselskabet".
+    // strcasecmp, not containsCaseInsensitive - a substring match on "MET" would be far too loose.
+    svc.isMetro = (strcasecmp(raw.catOut,"MET")==0);
+    // Defensive: MODE_METRO already requests only the Metro product bit, so this should never
+    // discard anything - but a stop id shared with other products must never leak them onto a
+    // Metro-only board, so bail before committing the record (numServices only counts Metro).
+    if (metroOnlyFilter && !svc.isMetro) return;
+    if (svc.isMetro) {
+        // "Metro M1" -> "M1": the badge label. The word "Metro" is redundant inside a Metro board's
+        // round line badge, and wouldn't fit in it anyway.
+        if (strncasecmp(svc.via,"Metro ",6)==0) memmove(svc.via, svc.via+6, strlen(svc.via+6)+1);
+        // Metro departures carry an EMPTY JourneyDetailRef (live-confirmed), so there is no journey
+        // token to fetch calling-at with and nothing for raw.ref to fill serviceID from. serviceID
+        // is also what the main sketch uses (alongside sTime+destination) as a departed-train
+        // fingerprint and for same-primary detection, and with it blank two different M-lines
+        // heading the same direction in the same minute would look identical - so synthesise a
+        // unique one from the line, the full time (with seconds - Metro times are second-precise)
+        // and the direction.
+        if (!svc.serviceID[0]) snprintf(svc.serviceID,sizeof(svc.serviceID),"%s|%s|%s",svc.via,raw.time,raw.direction);
+    }
 
     char rtTimeShort[6];
     strlcpy(rtTimeShort, raw.rtTime, sizeof(rtTimeShort));
@@ -170,7 +193,33 @@ void rejseplanenClient::finaliseDepartureRecord() {
 
     strlcpy(svc.sortTime, isdigit((unsigned char)svc.etd[0]) ? svc.etd : svc.sTime, sizeof(svc.sortTime));
 
+    // Seconds of whichever time the HH:MM above (and so the countdown) is based on - realtime if
+    // it's what etd shows, otherwise the scheduled time. Only Metro actually reports non-zero
+    // seconds, but this is harmless (always 0) for everything else.
+    const char *secSrc = isdigit((unsigned char)svc.etd[0]) ? raw.rtTime : raw.time;
+    svc.sSec = (strlen(secSrc) >= 8 && secSrc[5] == ':') ? (uint8_t)atoi(secSrc+6) : 0;
+
     xStation->numServices++;
+}
+
+// Called when a Trip/LegList/Leg record's closing '}' is seen while parsing /api/trip (see
+// findMetroTripRef()). Latches tripFound when this Leg is the line (and, for the M3 loop, the
+// direction) of xStation->service[tripWantIdx] - from then on raw.ref holds its journey reference
+// and value()/startObject() stop touching raw.
+void rejseplanenClient::finaliseTripLeg() {
+    if (tripFound || tripWantIdx < 0 || !raw.ref[0]) return;
+    const rdiService &svc = xStation->service[tripWantIdx];
+    const char *line = raw.name;
+    if (strncasecmp(line,"Metro ",6)==0) line += 6;          // "Metro M3" -> "M3", as in the departure board
+    if (strcmp(line, svc.via) != 0) return;
+    // A loop line's departures are told apart by their "via X" direction text, and a trip from here
+    // to X can come back with either lap direction available - so only accept the leg whose own
+    // direction says the same thing. Compared in Latin-1, the form svc.destination is already in.
+    if (strncasecmp(svc.destination,"via ",4)==0) {
+        convertDanishToLatin1(raw.direction, sizeof(raw.direction));
+        if (strcmp(raw.direction, svc.destination) != 0) return;
+    }
+    tripFound = true;
 }
 
 // Called when a Stops/Stop record's closing '}' is seen while parsing journeyDetail.
@@ -183,6 +232,7 @@ void rejseplanenClient::finaliseCallingStop() {
     // Prefer the arrival time (when the train reaches this calling point), falling back to the
     // departure time for stops that only have one (e.g. the very first/last stop of the journey).
     strlcpy(callingStops[numCallingStops].time, stopScratchArrTime[0] ? stopScratchArrTime : stopScratchDepTime, sizeof(callingStops[0].time));
+    callingStops[numCallingStops].routeIdx = stopScratchRouteIdx;
     numCallingStops++;
 }
 
@@ -208,6 +258,15 @@ void rejseplanenClient::finaliseStopSearchResult() {
 }
 
 void rejseplanenClient::whitespace(char c) {}
+
+void rejseplanenClient::logResult(const char *fmt, ...) {
+    size_t used = strlen(js->lastResultMessage);
+    if (used >= MAXRESULTMESSAGESIZE-1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(js->lastResultMessage+used, MAXRESULTMESSAGESIZE-used, fmt, ap);
+    va_end(ap);
+}
 
 void rejseplanenClient::startDocument() {
     stackTop = 0;
@@ -240,6 +299,14 @@ void rejseplanenClient::value(const char *value) {
         else if (strcmp(currentPath,"stopLocationOrCoordLocation/StopLocation/extId")==0) strlcpy(stopSearchExtId,value,sizeof(stopSearchExtId));
         return;
     }
+    if (fetchingTrip) {
+        // Latched once the Leg we want has been found: raw.ref must survive untouched from here on.
+        if (tripFound) return;
+        if (strcmp(currentPath,"Trip/LegList/Leg/name")==0) strlcpy(raw.name,value,sizeof(raw.name));
+        else if (strcmp(currentPath,"Trip/LegList/Leg/direction")==0) strlcpy(raw.direction,value,sizeof(raw.direction));
+        else if (strcmp(currentPath,"Trip/LegList/Leg/JourneyDetailRef/ref")==0) strlcpy(raw.ref,value,sizeof(raw.ref));
+        return;
+    }
     if (fetchingDepartures) {
         if (strcmp(currentPath,"Departure/name")==0) strlcpy(raw.name,value,sizeof(raw.name));
         else if (strcmp(currentPath,"Departure/direction")==0) strlcpy(raw.direction,value,sizeof(raw.direction));
@@ -258,17 +325,37 @@ void rejseplanenClient::value(const char *value) {
         else if (strcmp(currentPath,"Stops/Stop/extId")==0) strlcpy(stopScratchExtId,value,sizeof(stopScratchExtId));
         else if (strcmp(currentPath,"Stops/Stop/arrTime")==0) strlcpy(stopScratchArrTime,value,sizeof(stopScratchArrTime));
         else if (strcmp(currentPath,"Stops/Stop/depTime")==0) strlcpy(stopScratchDepTime,value,sizeof(stopScratchDepTime));
+        else if (strcmp(currentPath,"Stops/Stop/routeIdx")==0) stopScratchRouteIdx = atoi(value);
+        // See rjDirectionSegment's own comment - only present at all for a splitting service.
+        // Requires arrayElementKeyByDepth's general nested-array fix (see startObject()) to ever see
+        // more than the FIRST Direction entry - the one entry that actually matters here (the final,
+        // single-destination branch) is always the LAST one.
+        else if (strcmp(currentPath,"Directions/Direction/value")==0) strlcpy(pendingDirectionValue,value,sizeof(pendingDirectionValue));
+        else if (strcmp(currentPath,"Directions/Direction/routeIdxTo")==0 && numDirectionSegments < MAXDIRECTIONSEGMENTS) {
+            strlcpy(directionSegments[numDirectionSegments].value, pendingDirectionValue, sizeof(directionSegments[0].value));
+            convertDanishToLatin1(directionSegments[numDirectionSegments].value, sizeof(directionSegments[0].value));
+            directionSegments[numDirectionSegments].routeIdxTo = atoi(value);
+            numDirectionSegments++;
+        }
     }
 }
 
 void rejseplanenClient::startArray() {
     arrayDepth++;
+    // See arrayElementKeyByDepth's own declaration comment - captured for EVERY array (target or
+    // not), before pendingKey can be overwritten by walking its first element's own fields.
+    if (arrayDepth-1 < MAXARRAYDEPTHTRACK) {
+        strlcpy(arrayElementKeyByDepth[arrayDepth-1], pendingKey, sizeof(arrayElementKeyByDepth[0]));
+        arrayElementBaseDepthByDepth[arrayDepth-1] = stackTop;
+    }
     if (!inTargetArray) {
         bool isTarget;
         if (searchingStops) {
             isTarget = (strcmp(pendingKey,"stopLocationOrCoordLocation")==0);
         } else if (fetchingDepartures) {
             isTarget = (strcmp(pendingKey,"Departure")==0);
+        } else if (fetchingTrip) {
+            isTarget = (strcmp(pendingKey,"Leg")==0);
         } else {
             isTarget = (strcmp(pendingKey,"Stop")==0 && stackTop>0 && strcmp(pathStack[stackTop-1],"Stops")==0);
         }
@@ -295,7 +382,8 @@ void rejseplanenClient::startObject() {
     if (isNewTargetElement) {
         if (searchingStops) { stopSearchName[0] = '\0'; stopSearchExtId[0] = '\0'; }
         else if (fetchingDepartures) resetRawRecord();
-        else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; }
+        else if (fetchingTrip) { if (!tripFound) resetRawRecord(); }
+        else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; stopScratchRouteIdx = -1; }
     }
 
     // Array elements have no key() call of their own. For a NEW target-array element, use the
@@ -304,9 +392,12 @@ void rejseplanenClient::startObject() {
     // PREVIOUS element's own contents (e.g. "directionFlag", the last field of a Departure record).
     // Pushing that stale value instead of "Departure"/"Stop" would build the wrong path prefix for
     // every field in every element after the first, so none of them would ever match a known path.
-    // For every other (non-boundary) object push, pendingKey is correct as-is, since those always
+    // Same reasoning applies to any OTHER array of objects too, not just the target one - see
+    // arrayElementKeyByDepth's own comment - so that's checked next, as a general fallback. For
+    // every other (truly non-boundary) object push, pendingKey is correct as-is, since those always
     // have a proper, immediately-preceding key() call.
-    const char *keyToPush = isNewTargetElement ? targetElementKey : pendingKey;
+    bool isNewInnerArrayElement = !isNewTargetElement && arrayDepth>0 && (arrayDepth-1)<MAXARRAYDEPTHTRACK && stackTop == arrayElementBaseDepthByDepth[arrayDepth-1];
+    const char *keyToPush = isNewTargetElement ? targetElementKey : (isNewInnerArrayElement ? arrayElementKeyByDepth[arrayDepth-1] : pendingKey);
 
     // The anonymous document-root object has no preceding key() call - skip pushing it so
     // paths don't gain a spurious leading "/" (every other startObject() always has a non-empty
@@ -333,6 +424,7 @@ void rejseplanenClient::endObject() {
     if (inTargetArray && stackTop == arrayBaseDepth) {
         if (searchingStops) finaliseStopSearchResult();
         else if (fetchingDepartures) finaliseDepartureRecord();
+        else if (fetchingTrip) finaliseTripLeg();
         else finaliseCallingStop();
     }
 }
@@ -372,11 +464,60 @@ int rejseplanenClient::readResponseHeaders(WiFiClientSecure &client, long &conte
 }
 
 // See declaration comment in rejseplanenClient.h.
-long rejseplanenClient::readResponseBody(WiFiClientSecure &client, long contentLength, JsonStreamingParserGS &parser, unsigned long timeoutMs, bool &timedOut) {
+long rejseplanenClient::readResponseBody(WiFiClientSecure &client, long contentLength, bool chunked, JsonStreamingParserGS &parser, unsigned long timeoutMs, bool &timedOut) {
     timedOut = false;
     long received = 0;
     uint8_t chunk[512];
     unsigned long deadline = millis() + timeoutMs;
+
+    if (chunked) {
+        // Transfer-Encoding: chunked - confirmed this API does send this sometimes (see bChunked/
+        // "C!" in the fetch log at the end of fetchDepartures()). The body isn't raw JSON in this
+        // case, it's a sequence of "<hex size>\r\n<that many raw bytes>\r\n" chunks terminated by a
+        // zero-size chunk - previously this fell into the contentLength<0 branch below and got read
+        // as if it WERE raw JSON, feeding the hex-size/CRLF framing itself into the parser as stray
+        // bytes mid-stream. Depending on exactly where a chunk boundary landed, that could silently
+        // truncate or corrupt the parse partway through a big response (an S-tog board's many
+        // departures being the most likely to actually hit a size worth chunking) - fewer services
+        // parsed than were really sent, but still a "successful" read as far as the caller can tell,
+        // since nothing here failed or timed out. This decodes the framing properly so the parser
+        // only ever sees real payload bytes.
+        while (true) {
+            if (millis() >= deadline) { timedOut = true; break; }
+            String sizeLine = client.readStringUntil('\n');
+            sizeLine.trim();
+            if (!sizeLine.length()) {
+                // A blank read here means either the deadline-independent client timeout expired
+                // (WiFiClientSecure has its own internal read timeout, set well under our deadline)
+                // or the connection dropped - either way there's no usable chunk-size line.
+                if (!client.connected()) { timedOut = true; break; }
+                if (millis() >= deadline) { timedOut = true; break; }
+                continue;
+            }
+            long chunkSize = strtol(sizeLine.c_str(), nullptr, 16);
+            if (chunkSize <= 0) break; // final (zero-size) chunk - body complete, ignore any trailers
+            long chunkReceived = 0;
+            while (chunkReceived < chunkSize) {
+                if (millis() >= deadline) { timedOut = true; break; }
+                int avail = client.available();
+                if (avail > 0) {
+                    long want = chunkSize - chunkReceived;
+                    if (want > (long)sizeof(chunk)) want = sizeof(chunk);
+                    if (avail > (int)want) avail = (int)want;
+                    int n = client.read(chunk, avail);
+                    for (int i=0;i<n;i++) parser.parse((char)chunk[i]);
+                    chunkReceived += n;
+                    received += n;
+                } else if (!client.connected()) {
+                    timedOut = true;
+                    break;
+                } else delay(5);
+            }
+            if (timedOut) break;
+            client.readStringUntil('\n'); // consume the CRLF that follows every chunk's data
+        }
+        return received;
+    }
 
     if (contentLength >= 0) {
         // Known body length (the normal, keep-alive-eligible case) - read exactly that many bytes and
@@ -419,11 +560,12 @@ long rejseplanenClient::readResponseBody(WiFiClientSecure &client, long contentL
 //
 // Fetches the departure board for a stop and (optionally) the calling points for the first service
 //
-int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache) {
+int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache, bool metroOnly) {
 
     unsigned long perfTimer = millis();
     bool bChunked = false;
     js->lastResultMessage[0] = '\0';
+    metroOnlyFilter = metroOnly;
 
     // See MIN_SAFE_HEAP_FOR_FETCH's own comment - refuse to open a new TLS connection at all while
     // the heap is already too fragmented to safely support one. Checked before anything else in this
@@ -465,6 +607,10 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     xMessages->numMessages = 0;
     xStation->platformAvailable = false;
     strlcpy(xStation->location, stopId, sizeof(xStation->location));
+    // See pendingSplitInfo's own declaration comment for why this is just 2 scalars, not part of the
+    // per-service reset loop below.
+    pendingSplitInfo[0][0] = '\0';
+    pendingSplitInfo[1][0] = '\0';
     for (int i=0;i<MAXBOARDSERVICES;++i) {
         xStation->service[i].sTime[0] = '\0';
         xStation->service[i].destination[0] = '\0';
@@ -482,6 +628,8 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         xStation->service[i].isCancelled = false;
         xStation->service[i].isDelayed = false;
         xStation->service[i].isSTog = false;
+        xStation->service[i].isMetro = false;
+        xStation->service[i].sSec = 0;
     }
     numCallingStops = 0;
 
@@ -524,6 +672,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     request += " HTTP/1.1\r\nHost: " + String(rjHost) + "\r\nConnection: keep-alive\r\n\r\n";
 
     httpsClient.print(request);
+    apiRequestCount++;
 
     long contentLength = -1;
     bool serverAllowsReuse = true;
@@ -539,10 +688,11 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     parser.setListener(this);
     parser.reset();
     fetchingDepartures = true;
+    fetchingTrip = false;
 
     perfTimer = millis();
     bool bodyTimedOut = false;
-    long dataReceived = readResponseBody(httpsClient, contentLength, parser, 12000UL, bodyTimedOut);
+    long dataReceived = readResponseBody(httpsClient, contentLength, bChunked, parser, 12000UL, bodyTimedOut);
 
     // Only safe to hand this same connection to getServiceDetails() below when the server didn't ask
     // to close it, the body actually finished (not abandoned mid-read), and the socket's still up -
@@ -555,7 +705,20 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         return UPD_TIMEOUT;
     }
 
-    if (xStation->numServices == 0 && dataReceived < 20) {
+    // Used to only distrust a zero-service result when dataReceived was also suspiciously small
+    // (<20 bytes - i.e. barely more than an empty "{}"). But every station this board is actually
+    // pointed at (København H, Odense St.) has departures scheduled essentially around the clock -
+    // a "successful", complete-looking response that genuinely parsed to zero departures is far
+    // more likely a transient upstream hiccup (or, before the chunked-decoding fix above, a
+    // corrupted parse of a chunked response) than a real empty board. Treating it as a real board
+    // meant instantly overwriting a perfectly good, already-displayed board with "no planned
+    // departures" - a jarring, visible flash for what was never a real state change. Now this always
+    // falls back to the same soft-failure path the caller already had for a timeout/HTTP error:
+    // keep showing the last good board and quietly retry next cycle (see the UPD_DATA_ERROR handling
+    // around showNoDataScreen() in departureBoardLoop() - it only actually blanks the board if
+    // noDataLoaded was already true, i.e. there was no good board to keep showing in the first
+    // place).
+    if (xStation->numServices == 0) {
         httpsClient.stop();
         strcpy(js->lastResultMessage,"Error: Incomplete data");
         return UPD_DATA_ERROR;
@@ -623,6 +786,10 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     } else if (samePrimaryService) {
         strlcpy(xStation->service[0].calling, station->calling, sizeof(xStation->service[0].calling));
         strlcpy(xStation->service[0].origin, station->origin, sizeof(xStation->service[0].origin));
+        // Same exact journey (verified above via sTime+destination+serviceID) as last cycle, so
+        // whatever split info was already known for it is still accurate too - see splitInfo's own
+        // comment in sharedDataStructs.h.
+        strlcpy(pendingSplitInfo[0], station->splitInfo, sizeof(pendingSplitInfo[0]));
         callingFetchKnown = true;
     } else if (fetchCallingPoints && xStation->numServices && xStation->service[0].serviceID[0]) {
         // The overall board fetch above already succeeded (that's how we got here), so this being
@@ -633,7 +800,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         // loadDepartures() uses that (not calling[0]/origin[0] being non-empty) to tell "we know this
         // service has no further calling points" apart from "we don't know yet, the fetch failed" -
         // see rdStation::callingKnown's own comment for why that distinction matters.
-        callingFetchKnown = (getServiceDetails(httpsClient, xStation->service[0].serviceID, accessId, stopId, 0) == UPD_SUCCESS);
+        callingFetchKnown = (getCallingForService(httpsClient, 0, accessId, stopId) == UPD_SUCCESS);
         if (callingFetchKnown && useLineDirCache) storeLineDirCacheEntry(xStation->service[0].via, xStation->service[0].destination, xStation->service[0].calling, xStation->service[0].origin);
     } else {
         callingFetchKnown = false;
@@ -670,9 +837,12 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         } else if (sameNext) {
             strlcpy(xStation->service[1].calling, station->nextCalling, sizeof(xStation->service[1].calling));
             strlcpy(xStation->service[1].origin, station->nextOrigin, sizeof(xStation->service[1].origin));
+            // Same journey as last cycle's position [1] (verified above) - see samePrimaryService's
+            // own splitInfo comment.
+            strlcpy(pendingSplitInfo[1], station->nextSplitInfo, sizeof(pendingSplitInfo[1]));
             nextCallingFetchKnown = true;
         } else if (xStation->service[1].serviceID[0]) {
-            nextCallingFetchKnown = (getServiceDetails(httpsClient, xStation->service[1].serviceID, accessId, stopId, 1) == UPD_SUCCESS);
+            nextCallingFetchKnown = (getCallingForService(httpsClient, 1, accessId, stopId) == UPD_SUCCESS);
             if (nextCallingFetchKnown && useLineDirCache) storeLineDirCacheEntry(xStation->service[1].via, xStation->service[1].destination, xStation->service[1].calling, xStation->service[1].origin);
         } else {
             nextCallingFetchKnown = false;
@@ -687,7 +857,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     httpsClient.stop();
 
     UBaseType_t uxHighWaterMark = uxTaskGetStackHighWaterMark(NULL);
-    sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"[RP] OK: D:%d T:%d S:%d %s",dataReceived,millis()-perfTimer,uxHighWaterMark,bChunked?"C!":"");
+    logResult("[RP] OK: D:%d T:%d S:%d %s",dataReceived,millis()-perfTimer,uxHighWaterMark,bChunked?"C!":"");
     return UPD_SUCCESS;
 }
 
@@ -728,7 +898,7 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
             retryCounter++;
         }
         if (retryCounter>=10) {
-            sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn-fail %lums ",millis()-tStart);
+            logResult("CD:conn-fail %lums ",millis()-tStart);
             return UPD_NO_RESPONSE;
         }
     }
@@ -748,15 +918,20 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
 
     String request = String("GET ") + rjJourneyDetailApi + "?accessId=" + String(accessId) + "&format=json&id=" + encodedRef + " HTTP/1.1\r\nHost: " + String(rjHost) + "\r\nConnection: keep-alive\r\n\r\n";
     httpsClient.print(request);
+    apiRequestCount++;
 
     long contentLength = -1;
     bool serverAllowsReuse = true;
-    bool chunkedUnused = false;
-    int headerResult = readResponseHeaders(httpsClient, contentLength, serverAllowsReuse, chunkedUnused);
+    // Not logged into js->lastResultMessage here the way fetchDepartures() logs bChunked (this
+    // function's own CD:... log line predates having a spare byte for it), but it's just as real a
+    // possibility for a large journeyDetail response (a full S-tog run's calling-at list can be
+    // 30KB+) - see readResponseBody()'s own comment for why this has to be decoded, not read raw.
+    bool bChunked = false;
+    int headerResult = readResponseHeaders(httpsClient, contentLength, serverAllowsReuse, bChunked);
     unsigned long tHeaders = millis();
     if (headerResult != UPD_SUCCESS) {
         httpsClient.stop();
-        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:conn%lu %s %lums ",tConnected-tStart,headerResult==UPD_TIMEOUT?"resp-fail":"http-err",millis()-tStart);
+        logResult("CD:conn%lu %s %lums ",tConnected-tStart,headerResult==UPD_TIMEOUT?"resp-fail":"http-err",millis()-tStart);
         return headerResult;
     }
 
@@ -772,6 +947,11 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     // land inside the FIRST call's leftover stops - building the "calling at" list from the wrong
     // service's route entirely. Resetting per-call keeps each fetch's result scoped to its own journey.
     numCallingStops = 0;
+    // Same reasoning for the split-detection state (see rjDirectionSegment's own comment) - a
+    // service with no Directions array at all (the normal, non-splitting case) should never inherit
+    // segments left over from a PREVIOUS call's splitting service.
+    numDirectionSegments = 0;
+    pendingDirectionValue[0] = '\0';
 
     // S-tog stops at every local station, so its journeyDetail responses run far larger than a
     // typical intercity Tog service's (a real København H S-tog journey measured here came to
@@ -786,7 +966,7 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     // raising this further to 35s as a safe hedge while the timing log below (js->lastResultMessage,
     // see /info) gathers real numbers from the actual hardware.
     bool bodyTimedOut = false;
-    long bytesReceived = readResponseBody(httpsClient, contentLength, parser, 35000UL, bodyTimedOut);
+    long bytesReceived = readResponseBody(httpsClient, contentLength, bChunked, parser, 35000UL, bodyTimedOut);
     unsigned long tDone = millis();
 
     // Same reuse conditions as fetchDepartures() - only leave the connection open for a possible
@@ -796,10 +976,10 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     if (!canReuseConnection) httpsClient.stop();
 
     if (bodyTimedOut || numCallingStops == 0) {
-        sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:c%luh%lup%lu B%ld stops%d TIMEOUT ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived,numCallingStops);
+        logResult("CD:c%luh%lup%lu B%ld stops%d TIMEOUT ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived,numCallingStops);
         return UPD_TIMEOUT;
     }
-    sprintf(js->lastResultMessage+strlen(js->lastResultMessage),"CD:c%luh%lup%lu B%ld ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived);
+    logResult("CD:c%luh%lup%lu B%ld ",tConnected-tStart,tHeaders-tConnected,tDone-tHeaders,bytesReceived);
 
     // Find the requested stop in the route, and build the "calling at" list from what follows it
     int matchIdx = -1;
@@ -815,15 +995,24 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
     // names (the board still shows the S-tog line's own minute countdown separately). Not tied to
     // any specific station - any S-tog service benefits, whether reached via a mixed DK Rail board
     // at København H or the dedicated S-tog mode at any other S-tog-served stop.
-    bool omitCallingTimes = xStation->service[targetIdx].isSTog;
+    bool isMetroSvc = xStation->service[targetIdx].isMetro;
+    // Metro too: a stop every couple of minutes, so per-stop times add nothing but length.
+    bool omitCallingTimes = xStation->service[targetIdx].isSTog || isMetroSvc;
+    // M3 is a loop: its journey reference covers two full laps of the ring (35 stops, confirmed live),
+    // so "everything after this stop" would be the whole ring and then some. List only the next few,
+    // and never run past the point where the train arrives back at this very stop.
+    bool isLoopLine = isMetroSvc && strcmp(xStation->service[targetIdx].via,"M3")==0;
+    const int loopMaxStops = 8;
 
     if (matchIdx >= 0) {
         if (matchIdx > 0) strlcpy(xStation->service[targetIdx].origin, callingStops[0].name, sizeof(xStation->service[targetIdx].origin));
         for (int i=matchIdx+1; i<numCallingStops; i++) {
+            if (isLoopLine && (i-matchIdx > loopMaxStops || strcmp(callingStops[i].extId, stopId)==0)) break;
             // "Stop name (HH:MM)" - matches the UK rail board's calling-point format
             char entry[MAXLOCATIONSIZE+10];
             if (!omitCallingTimes && callingStops[i].time[0]) sprintf(entry,"%s (%s)",callingStops[i].name,callingStops[i].time);
             else strlcpy(entry,callingStops[i].name,sizeof(entry));
+            if (isMetroSvc) stripMetroSuffix(entry);
 
             size_t curLen = strlen(xStation->service[targetIdx].calling);
             size_t addLen = strlen(entry) + (curLen ? 2 : 0);
@@ -833,7 +1022,163 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
         }
     }
 
+    pendingSplitInfo[targetIdx][0] = '\0';
+    // A splitting service (Directions had 2+ segments - see rjDirectionSegment's own comment) only
+    // needs mentioning here if the split is still AHEAD of the requesting stop - if it already
+    // happened before reaching here, it's no longer relevant to a passenger boarding now. Only the
+    // LAST segment's destination is used (a real three-way split would mention just that final
+    // branch, not each intermediate one) - genuinely rare enough in practice that chaining multiple
+    // split messages through a single splitInfo field isn't worth the extra complexity.
+    if (matchIdx >= 0 && numDirectionSegments >= 2) {
+        int splitRouteIdx = directionSegments[numDirectionSegments-2].routeIdxTo;
+        if (splitRouteIdx > callingStops[matchIdx].routeIdx) {
+            for (int i=matchIdx+1; i<numCallingStops; i++) {
+                if (callingStops[i].routeIdx == splitRouteIdx) {
+                    // "Fra Fredericia St. køres som ICL 31 mod Aalborg Lufthavn St." - via is already
+                    // this exact journey's own train name/number (populated from the departureBoard
+                    // fetch, before getServiceDetails() is ever called), confirmed live to match
+                    // exactly what Rejseplanen's own site labels the continuing portion as in every
+                    // case checked, so no need to also parse journeyDetail's own (near-identical)
+                    // Names/Name array just for this.
+                    snprintf(pendingSplitInfo[targetIdx], sizeof(pendingSplitInfo[targetIdx]),
+                        "Fra %s k\xF8res som %s mod %s.", callingStops[i].name, xStation->service[targetIdx].via, directionSegments[numDirectionSegments-1].value);
+                    break;
+                }
+            }
+        }
+    }
+
     return UPD_SUCCESS;
+}
+
+// Stop ids to ask /api/trip to route to, keyed by what the Metro departure board shows as a
+// departure's direction (already in Latin-1 by the time it's looked up here - see
+// finaliseDepartureRecord()). All confirmed against the live API: the five termini of M1/M2/M4, and
+// the five stations the M3 loop's "via X" label steps through (the trip is routed TO the via station -
+// the first hop in that direction - rather than to a terminus, since a loop has none). A direction not
+// in this table (e.g. a future new Metro station) just means no calling-at for that departure, never
+// a wrong one. Split literals ("K\xF8" "benhavn") because a \x escape swallows every hex digit after
+// it, and 'b' is one.
+struct MetroDest { const char *name; const char *id; };
+static const MetroDest metroDests[] = {
+    { "Vanl\xF8se",          "8603301" },
+    { "Vestamager",          "8603317" },
+    { "Lufthavnen",          "8603328" },
+    { "K\xF8" "benhavn Syd", "8603351" },
+    { "Orientkaj",           "8603345" },
+    { "Frederiksberg",       "8603305" },
+    { "N\xF8rrebro",         "8603339" },
+    { "\xD8sterport",        "8603334" },
+    { "Kongens Nytorv",      "8603308" },
+    { "K\xF8" "benhavn H",   "8603330" },
+};
+
+static const char* metroDestinationId(const char *direction) {
+    if (strncasecmp(direction,"via ",4)==0) direction += 4;
+    for (size_t i=0; i<sizeof(metroDests)/sizeof(metroDests[0]); i++) {
+        if (strcmp(direction, metroDests[i].name)==0) return metroDests[i].id;
+    }
+    return nullptr;
+}
+
+// "Gammel Strand St. (Metro)" -> "Gammel Strand", "K\xF8" "benhavn H (Metro)" -> "K\xF8" "benhavn H": Metro stops
+// carry this suffix in journeyDetail, which is just noise in a Metro board's own calling-at list.
+static void stripMetroSuffix(char *name) {
+    size_t n = strlen(name);
+    if (n > 8 && strcmp(name+n-8," (Metro)")==0) { name[n-8] = '\0'; n -= 8; }
+    if (n > 4 && strcmp(name+n-4," St.")==0) name[n-4] = '\0';
+}
+
+// See the declaration comment in rejseplanenClient.h. The lookup is done on the same keep-alive
+// connection the caller already has (reconnecting if needed, exactly like getServiceDetails()) and
+// reads at most one trip - the response is large (~25KB for one trip, vs ~77KB for three) so there's
+// no reason to ask for more than the single Leg we need.
+int rejseplanenClient::findMetroTripRef(WiFiClientSecure &httpsClient, const char *accessId, const char *stopId, const char *destId, int idx) {
+    unsigned long tStart = millis();
+    if (!httpsClient.connected()) {
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) {
+            strcpy(js->lastResultMessage,"Error: Heap too fragmented, skipping cycle");
+            return UPD_NO_RESPONSE;
+        }
+        httpsClient.setInsecure();
+        httpsClient.setTimeout(8000);
+        httpsClient.setConnectionTimeout(8000);
+        httpsClient.setNoDelay(false);
+        int retryCounter = 0;
+        while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 10)) {
+            delay(100);
+            retryCounter++;
+        }
+        if (retryCounter>=10) {
+            logResult("TR:conn-fail ");
+            return UPD_NO_RESPONSE;
+        }
+    }
+
+    // lines= takes the bare line ("M3"), which is what the departure board's label was already
+    // reduced to; products=1024 keeps everything else out of the answer.
+    String request = String("GET /api/trip?accessId=") + String(accessId) + "&format=json&originId=" + String(stopId) +
+        "&destId=" + String(destId) + "&products=1024&numF=1&lines=" + String(xStation->service[idx].via) +
+        " HTTP/1.1\r\nHost: " + String(rjHost) + "\r\nConnection: keep-alive\r\n\r\n";
+    httpsClient.print(request);
+    apiRequestCount++;
+
+    long contentLength = -1;
+    bool serverAllowsReuse = true;
+    bool bChunked = false;
+    int headerResult = readResponseHeaders(httpsClient, contentLength, serverAllowsReuse, bChunked);
+    if (headerResult != UPD_SUCCESS) {
+        httpsClient.stop();
+        logResult("TR:%s ",headerResult==UPD_TIMEOUT?"resp-fail":"http-err");
+        return headerResult;
+    }
+
+    JsonStreamingParserGS parser;
+    parser.setListener(this);
+    parser.reset();
+    fetchingDepartures = false;
+    searchingStops = false;
+    fetchingTrip = true;
+    tripFound = false;
+    tripWantIdx = (int8_t)idx;
+    resetRawRecord();
+
+    bool bodyTimedOut = false;
+    long bytes = readResponseBody(httpsClient, contentLength, bChunked, parser, 25000UL, bodyTimedOut);
+
+    fetchingTrip = false;
+    tripWantIdx = -1;
+    bool canReuseConnection = serverAllowsReuse && !bodyTimedOut && contentLength >= 0 && httpsClient.connected();
+    if (!canReuseConnection) httpsClient.stop();
+
+    if (bodyTimedOut) {
+        logResult("TR:timeout B%ld ",bytes);
+        return UPD_TIMEOUT;
+    }
+    if (!tripFound) {
+        logResult("TR:nomatch B%ld ",bytes);
+        return UPD_DATA_ERROR;
+    }
+    logResult("TR:%lums B%ld ",millis()-tStart,bytes);
+    return UPD_SUCCESS;
+}
+
+int rejseplanenClient::getCallingForService(WiFiClientSecure &httpsClient, int idx, const char *accessId, const char *stopId) {
+    rdiService &svc = xStation->service[idx];
+    if (!svc.isMetro) return getServiceDetails(httpsClient, svc.serviceID, accessId, stopId, idx);
+
+    const char *destId = metroDestinationId(svc.destination);
+    // No known destination, or a trip from a stop to itself (the board's own station IS the terminus/
+    // via point) - nothing sensible to ask the trip planner, so just leave calling-at unknown.
+    if (!destId || strcmp(destId, stopId)==0) {
+        logResult("TR:nodest ");
+        return UPD_DATA_ERROR;
+    }
+    int result = findMetroTripRef(httpsClient, accessId, stopId, destId, idx);
+    if (result != UPD_SUCCESS) return result;
+    // raw.ref now holds the matching leg's journey reference - raw is otherwise unused outside of
+    // parsing, so it's safe to hand getServiceDetails() a pointer straight into it.
+    return getServiceDetails(httpsClient, raw.ref, accessId, stopId, idx);
 }
 
 // See declaration comment in rejseplanenClient.h. Doesn't take lineDirCacheMux itself - always
@@ -925,11 +1270,14 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         strlcpy(station->service[i].stopArea, xStation->service[i].stopArea, sizeof(station->service[0].stopArea));
         station->service[i].serviceType = xStation->service[i].serviceType;
         station->service[i].isSTog = xStation->service[i].isSTog;
+        station->service[i].isMetro = xStation->service[i].isMetro;
+        station->service[i].sSec = xStation->service[i].sSec;
         strlcpy(station->service[i].serviceID, xStation->service[i].serviceID, sizeof(station->service[0].serviceID));
     }
     if (xStation->numServices) {
         strlcpy(station->calling, xStation->service[0].calling, sizeof(station->calling));
         strlcpy(station->origin, xStation->service[0].origin, sizeof(station->origin));
+        strlcpy(station->splitInfo, pendingSplitInfo[0], sizeof(station->splitInfo));
         strlcpy(station->serviceMessage, xStation->service[0].serviceMessage, sizeof(station->serviceMessage));
         station->callingKnown = callingFetchKnown;
     } else {
@@ -938,6 +1286,7 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
     if (xStation->numServices>1) {
         strlcpy(station->nextCalling, xStation->service[1].calling, sizeof(station->nextCalling));
         strlcpy(station->nextOrigin, xStation->service[1].origin, sizeof(station->nextOrigin));
+        strlcpy(station->nextSplitInfo, pendingSplitInfo[1], sizeof(station->nextSplitInfo));
         station->nextCallingKnown = nextCallingFetchKnown;
     } else {
         station->nextCallingKnown = false;
@@ -989,6 +1338,7 @@ String rejseplanenClient::searchStops(const char *query, const char *accessId, i
 
     String request = String("GET ") + rjLocationNameApi + "?accessId=" + String(accessId) + "&format=json&input=" + encodedQuery + " HTTP/1.0\r\nHost: " + String(rjHost) + "\r\nConnection: close\r\n\r\n";
     httpsClient.print(request);
+    apiRequestCount++;
 
     retryCounter = 0;
     while (!httpsClient.available()) {

@@ -72,6 +72,8 @@
             <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeLetbane"><img src="/itube.webp" class="me-2" alt=""> Letbane</label>
             <input type="radio" class="btn-check" name="boardmode" id="modeDkBus" value="5" autocomplete="off">
             <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkBus"><img src="/ibus.webp" class="me-2" alt=""> Bus</label>
+            <input type="radio" class="btn-check" name="boardmode" id="modeMetro" value="7" autocomplete="off">
+            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeMetro"><img src="/itube.webp" class="me-2" alt=""> Metro</label>
           </div>
         </div>
 
@@ -118,6 +120,12 @@
           <label class="form-label" for="stogName">S-tog Station</label>
           <input id="stogName" type="text" placeholder="Type the station name, e.g. København H" class="form-control typeahead">
           <div class="form-text">A dedicated S-tog board: line-letter badges, minute countdowns, S-tog services only - separate from DK Tog above so you can show both at once (e.g. DK Tog for the intercity board, S-tog for the same or a different station).</div>
+        </div>
+
+        <div class="mb-3" id="metroSearchBox" style="display:none">
+          <label class="form-label" for="metroName">Metro Station</label>
+          <input id="metroName" type="text" placeholder="Type the station name, e.g. Nørreport" class="form-control typeahead">
+          <div class="form-text">A dedicated Copenhagen Metro board: round M1/M2/M3/M4 line badges and minute countdowns, same style as S-tog above - separate from every other mode so you can show it alongside them.</div>
         </div>
 
         <div id="dkInvalidToken" style="display:none;">
@@ -425,6 +433,7 @@
                       <option value="6">S-tog</option>
                       <option value="4">Letbane</option>
                       <option value="5">Bus</option>
+                      <option value="7">Metro</option>
                     </select>
                   </div>
                 </div>
@@ -555,6 +564,26 @@
                   </div>
                 </div>
 
+                <div id="optApiBudget" style="display:none">
+                  <hr class="my-0 opacity-10">
+                  <div class="py-2">
+                    <div class="d-flex justify-content-between align-items-center">
+                      <div>
+                        <label class="form-check-label d-block" for="enableApiBudget">Limit monthly Rejseplanen API usage</label>
+                        <div class="small text-body-secondary">Automatically slows the refresh rate as the month goes on to stay under a request budget, rather than running out early and going dark until it resets. Never refreshes faster than the rate chosen above, only slower.</div>
+                      </div>
+                      <div class="form-check form-switch mb-0">
+                        <input class="form-check-input" type="checkbox" id="enableApiBudget" role="switch">
+                      </div>
+                    </div>
+                    <div id="apiBudgetValueBox" style="display:none;margin-top:10px;">
+                      <label class="form-label" for="apiMonthlyBudget">Monthly request budget for this board</label>
+                      <input type="number" min="100" step="100" class="form-control" id="apiMonthlyBudget" style="max-width:160px;">
+                      <div class="form-text">If your Rejseplanen key is shared across more than one board, split your total monthly quota between them here - this only tracks and paces what THIS board sends.</div>
+                    </div>
+                  </div>
+                </div>
+
                 <hr class="my-0 opacity-10">
                 <div class="py-2">
                   <div class="d-flex justify-content-between align-items-center">
@@ -677,7 +706,7 @@
   <script>
     const appState = {
       nrTimeOffset: 0,
-      boardMode: 3, //3=Tog, 6=S-tog, 4=Letbane, 5=Bus
+      boardMode: 3, //3=Tog, 6=S-tog, 4=Letbane, 5=Bus, 7=Metro
       tzOK: true,
       hostnameOK: true,
       validRejseplanenKey: true,
@@ -706,6 +735,11 @@
       stogId: "",
       stogLat: 0,
       stogLon: 0,
+      metroStationSelected: false,
+      metroName: "",
+      metroId: "",
+      metroLat: 0,
+      metroLon: 0,
       firmwareVersion: "",
       prevFirmwareVersion: "",
       scheduler: [],
@@ -746,6 +780,7 @@
       letbaneName: document.getElementById('letbaneName'),
       dkBusName: document.getElementById('dkBusName'),
       stogName: document.getElementById('stogName'),
+      metroName: document.getElementById('metroName'),
       startupMode: document.getElementById('startupMode')
     };
 
@@ -965,6 +1000,19 @@
       }
     });
 
+    $(elements.metroName).typeahead({
+      name: 'dkstations',
+      source: substringMatcherDk(),
+      delay: 300,
+      updater: function (item) {
+        handleMetroStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="itube.webp" style="margin-right:6px">' + item;
+      }
+    });
+
     elements.form.addEventListener("submit", async function (e) {
       e.preventDefault();
       if (!appState.tzOK) await bsAlert(tzError);
@@ -974,6 +1022,7 @@
 
     elements.enableSleep.addEventListener("change", toggleSleepSelectors);
     elements.darkSleep.addEventListener("change", () => { show("optSleepUseBigClock", !isChecked("darkSleep"));})
+    document.getElementById("enableApiBudget").addEventListener("change", () => { show("apiBudgetValueBox", isChecked("enableApiBudget")); });
     elements.brightness.addEventListener("change", handleBrightnessChange);
     elements.optTouch.addEventListener("change", () => { show("optStayAwake", isChecked("optTouch")); show("optLongPressClock", isChecked("optTouch"));});
     elements.optTZ.addEventListener("change", () => { show("customTZbox", isChecked("optTZ")); if (!isChecked("optTZ")) { elements.customTZ.value = ""; appState.tzOK = true; } });
@@ -1184,16 +1233,18 @@
       const letbane = (mode === 4 && appState.validRejseplanenKey);
       const dkbus = (mode === 5 && appState.validRejseplanenKey);
       const stog = (mode === 6 && appState.validRejseplanenKey);
+      const metro = (mode === 7 && appState.validRejseplanenKey);
 
-      show("optShowServiceMsgs", dkrail || stog);
+      show("optShowServiceMsgs", dkrail || stog || metro);
       show("optShowPlatform", dkrail || stog);
-      show("optShowOrdinals", dkrail || stog);
-      show("optShowFullCalling", dkrail || stog);
-      show("optShowFullMsgs", dkrail || stog);
-      show("optNoScroll", dkrail || letbane || dkbus || stog);
-      show("optRssFeed", dkrail || letbane || stog);
-      show("optNrTimeOffset", dkrail || stog);
-      show("optFastRefresh", dkrail || letbane || dkbus || stog);
+      show("optShowOrdinals", dkrail || stog || metro);
+      show("optShowFullCalling", dkrail || stog || metro);
+      show("optShowFullMsgs", dkrail || stog || metro);
+      show("optNoScroll", dkrail || letbane || dkbus || stog || metro);
+      show("optRssFeed", dkrail || letbane || stog || metro);
+      show("optNrTimeOffset", dkrail || stog || metro);
+      show("optFastRefresh", dkrail || letbane || dkbus || stog || metro);
+      show("optApiBudget", dkrail || letbane || dkbus || stog || metro);
 
       show("optShowTubeLocation", letbane);
 
@@ -1201,13 +1252,15 @@
       show("letbaneSearchBox", letbane);
       show("dkBusSearchBox", dkbus);
       show("stogSearchBox", stog);
-      show("dkInvalidToken", (mode === 3 || mode === 4 || mode === 5 || mode === 6) && !appState.validRejseplanenKey);
+      show("metroSearchBox", metro);
+      show("dkInvalidToken", (mode === 3 || mode === 4 || mode === 5 || mode === 6 || mode === 7) && !appState.validRejseplanenKey);
 
       if (
         (dkrail && appState.dkCrs) ||
         (letbane && appState.letbaneId) ||
         (dkbus && appState.dkBusId) ||
-        (stog && appState.stogId)
+        (stog && appState.stogId) ||
+        (metro && appState.metroId)
       ) {
         enableSave(true);
       } else {
@@ -1223,6 +1276,7 @@
       document.getElementById("modeLetbane").checked = (mode === 4);
       document.getElementById("modeDkBus").checked = (mode === 5);
       document.getElementById("modeStog").checked = (mode === 6);
+      document.getElementById("modeMetro").checked = (mode === 7);
     }
 
     // DK Tog/Letbane/DK Bus/S-tog station fields are name-search typeaheads (see substringMatcherDk()
@@ -1241,6 +1295,8 @@
     elements.dkBusName.addEventListener("blur", () => setTimeout(handleDkBusStationLostFocus, 500));
     elements.stogName.addEventListener("focus", () => elements.stogName.select());
     elements.stogName.addEventListener("blur", () => setTimeout(handleStogStationLostFocus, 500));
+    elements.metroName.addEventListener("focus", () => elements.metroName.select());
+    elements.metroName.addEventListener("blur", () => setTimeout(handleMetroStationLostFocus, 500));
 
     function getCurrentLocationConfig() {
         let config = {
@@ -1276,12 +1332,19 @@
             config.dkBusLat = 0;
             config.dkBusLon = 0;
             config.filter = "";
-        } else { // S-tog
+        } else if (appState.boardMode === 6) { // S-tog
             config.name = appState.stogName || appState.stogId;
             config.stogName = config.name;
             config.stogId = appState.stogId;
             config.stogLat = 0;
             config.stogLon = 0;
+            config.filter = "";
+        } else { // Metro
+            config.name = appState.metroName || appState.metroId;
+            config.metroName = config.name;
+            config.metroId = appState.metroId;
+            config.metroLat = 0;
+            config.metroLon = 0;
             config.filter = "";
         }
         return config;
@@ -1296,6 +1359,7 @@
             if (mode === 4) return '<img src="/itube.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             if (mode === 5) return '<img src="/ibus.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             if (mode === 6) return '<img src="/irail.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
+            if (mode === 7) return '<img src="/itube.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             return '';
         };
 
@@ -1370,6 +1434,8 @@
       appState.dkBusId = s.dkBusId || "";
       appState.stogName = s.stogName || "";
       appState.stogId = s.stogId || "";
+      appState.metroName = s.metroName || "";
+      appState.metroId = s.metroId || "";
 
       appState.boardMode = s.mode ?? 3;
       highlightModeButtons(appState.boardMode);
@@ -1388,6 +1454,7 @@
       elements.letbaneName.value = appState.letbaneName;
       elements.dkBusName.value = appState.dkBusName;
       elements.stogName.value = appState.stogName;
+      elements.metroName.value = appState.metroName;
       elements.brightness.value = s.brightness ?? 50;
       const pct = (elements.brightness.value / 255) * 100;
       elements.brightness.title = Math.round(pct) + "%";
@@ -1415,6 +1482,9 @@
       setCheckbox("showFullCalling", (s.showFullCalling ?? true));
       setCheckbox("showFullMsgs", (s.showFullMsgs ?? true));
       setCheckbox("enableFastRefresh", s.fastRefresh);
+      setCheckbox("enableApiBudget", s.apiBudgetPacing ?? false);
+      document.getElementById("apiMonthlyBudget").value = s.apiMonthlyBudget ?? 25000;
+      show("apiBudgetValueBox", isChecked("enableApiBudget"));
       setCheckbox("noScrolling", s.noScroll);
       setCheckbox("optFlip", s.flip);
       setCheckbox("optTouch", s.touch);
@@ -1512,6 +1582,18 @@
       else appState.stogStationSelected = false;
     }
 
+    function handleMetroStationSelected(item) {
+      appState.metroStationSelected = true;
+      appState.metroName = item.name;
+      appState.metroId = item.id;
+      enableSave(true);
+    }
+
+    function handleMetroStationLostFocus() {
+      if (!appState.metroStationSelected) elements.metroName.value = appState.metroName;
+      else appState.metroStationSelected = false;
+    }
+
     function handleBrightnessChange() {
       const brightness = this.value;
       appState.jsonSettings.brightness = brightness;
@@ -1541,6 +1623,8 @@
       s.showFullMsgs = isChecked("showFullMsgs");
       s.showClockNoServices = isChecked("showClockNoServices");
       s.fastRefresh = isChecked("enableFastRefresh");
+      s.apiBudgetPacing = isChecked("enableApiBudget");
+      s.apiMonthlyBudget = parseInt(document.getElementById("apiMonthlyBudget").value) || 25000;
       s.noScroll = isChecked("noScrolling");
       s.flip = isChecked("optFlip");
       s.touch = isChecked("optTouch");
@@ -1584,6 +1668,12 @@
         s.stogId = appState.stogId;
         s.stogLat = 0;
         s.stogLon = 0;
+      }
+      if (appState.metroId) {
+        s.metroName = appState.metroName || appState.metroId;
+        s.metroId = appState.metroId;
+        s.metroLat = 0;
+        s.metroLon = 0;
       }
       if (isChecked("optTZ") && elements.customTZ.value.trim().length) s.TZ = elements.customTZ.value.trim(); else delete s.TZ;
       if (isChecked("optHost") && elements.customHost.value.trim().length) s.hostname = elements.customHost.value.trim(); else delete s.hostname;
