@@ -42,6 +42,7 @@
 #include <weatherClient.h>
 #include <sharedDataStructs.h>
 #include <responseCodes.h>
+#include <boardText.h>
 #include <rejseplanenClient.h>
 #include <githubClient.h>
 #include <rssClient.h>
@@ -636,9 +637,29 @@ int getStringWidth(const char *message) {
 // Also covers Swedish ä/Ä/ö/Ö (Latin-1 0xE4/0xC4/0xF6/0xD6) - some Swedish trains (SJ/Snälltåg)
 // run through Danish stations, so their names/destinations can carry these too. å/Å are already
 // covered above (shared with Danish); ä/ö are the two genuinely Swedish-only ones.
+//
+// German ü/Ü/ß and every other Latin-1 letter (é, è, ñ, ç, ...) are covered the same way: the stock
+// "_tf" donor fonts carry the full Latin-1 set, so anything from 0xC0 up is borrowed from them - this
+// used to list only the Danish/Swedish letters one by one, so a German or French name lost its
+// accented letters. And the 18 Czech/Slovak caron letters (č ď ě ň ř š ť ů ž and capitals), which don't
+// exist in Latin-1 at all, are stored as private codes 14..31 (see boardText.h) and borrowed from an
+// extended "_te" donor, drawn by Unicode code point - see accentDonorFor() below.
 static bool isDanishAccentByte(unsigned char c) {
-  return c==0xE6 || c==0xF8 || c==0xE5 || c==0xC6 || c==0xD8 || c==0xC5    // æ ø å Æ Ø Å
-      || c==0xE4 || c==0xC4 || c==0xF6 || c==0xD6;                        // ä Ä ö Ö
+  return c >= 0xC0 || boardExtCodepointFor(c) != 0;
+}
+
+// The donor font to borrow a Czech/Slovak letter from, given the Latin-1 donor the caller passed (which
+// is picked to match the row's own font - see the callers). Neither of those "_tf" fonts has the
+// extended range, so each is paired with its closest extended sibling:
+//  - u8g2_font_6x10_tf -> u8g2_font_IPAandRUSLCD_te: the same glyph shapes and 6px advance for ordinary
+//    letters (measured: identical 5x7 capitals), plus the caron letters at no more than 8px tall - the
+//    same height as the Å/Ö the small rows already show, so they fit the same clip windows. (The
+//    obvious pick, u8g2_font_6x12_te, has 10px-tall capital carons that those windows cut off.)
+//  - u8g2_font_6x13_tf (and the bold badge font, which never carries these) -> u8g2_font_6x13_te.
+static const uint8_t* accentDonorFor(const uint8_t *latin1Donor, unsigned char code) {
+  if (boardExtCodepointFor(code) == 0) return latin1Donor;
+  if (latin1Donor == u8g2_font_6x10_tf) return u8g2_font_IPAandRUSLCD_te;
+  return u8g2_font_6x13_te;
 }
 
 // Rejseplanen API text (destination/via/stopArea/calling-point names) already arrives converted to
@@ -650,25 +671,7 @@ static bool isDanishAccentByte(unsigned char c) {
 // the client's, just a free-standing copy since that one is a private class method. Idempotent - a
 // string with no UTF-8 lead bytes (e.g. one already Latin-1, or plain ASCII) passes through unchanged.
 static void convertDanishToLatin1(char* input, size_t maxLen) {
-  if (!input || !input[0]) return;
-  char output[MAXLOCATIONSIZE*2];
-  size_t outPos = 0;
-  size_t len = strlen(input);
-  for (size_t i=0; i<len && outPos < sizeof(output)-1;) {
-    unsigned char c = (unsigned char)input[i];
-    if (c == 0xC3 && i+1 < len) {
-      unsigned char c2 = (unsigned char)input[i+1];
-      if (c2 >= 0x80 && c2 <= 0xBF) {
-        output[outPos++] = (char)(unsigned char)(0xC0 | (c2 & 0x3F));
-        i += 2;
-        continue;
-      }
-    }
-    output[outPos++] = input[i];
-    i++;
-  }
-  output[outPos] = '\0';
-  strlcpy(input, output, maxLen);
+  convertUtf8ToBoardText(input, maxLen);   // see boardText.h - also German ü/ß and Czech/Slovak letters
 }
 
 // u8g2 internals not exposed via the public U8g2lib.h/u8g2.h API, needed below to read a specific
@@ -733,17 +736,21 @@ int drawMixedStr(int x, int y, const char *text, const uint8_t *accentFont) {
     buf[0] = (char)c;
     bool isAccent = isDanishAccentByte(c);
     if (isAccent) {
-      bool isUpper = (c < 0xE0); // Æ/Ø/Å are 0xC6/0xD8/0xC5, æ/ø/å are 0xE6/0xF8/0xE5
+      // A Czech/Slovak letter (private code 14..31) is drawn by its real Unicode code point from an
+      // extended donor font; every other accent is a Latin-1 byte, drawn exactly as before.
+      uint16_t ext = boardExtCodepointFor(c);
+      uint16_t glyph = ext ? ext : c;
+      bool isUpper = ext ? boardExtIsUpper(c) : (c < 0xE0); // Æ/Ø/Å are 0xC6/0xD8/0xC5, æ/ø/å are 0xE6/0xF8/0xE5
       uint16_t refChar = isUpper ? 'O' : 'o';
       int8_t baseYoff=0;
       bool haveBaseMetrics = getGlyphYOffset(u, refChar, &baseYoff);
-      u8g2.setFont(accentFont);
+      u8g2.setFont(accentDonorFor(accentFont, c));
       int yShift = baseAscent - u8g2_GetFontAscent(u);
       int8_t accentYoff=0;
-      if (haveBaseMetrics && getGlyphYOffset(u, c, &accentYoff)) {
+      if (haveBaseMetrics && getGlyphYOffset(u, glyph, &accentYoff)) {
         yShift += accentYoff - baseYoff;
       }
-      cursorX += u8g2.drawStr(cursorX, y+yShift, buf);
+      cursorX += ext ? u8g2.drawGlyph(cursorX, y+yShift, ext) : u8g2.drawStr(cursorX, y+yShift, buf);
       u8g2.setFont(baseFont);
     } else {
       cursorX += u8g2.drawStr(cursorX, y, buf);
@@ -768,8 +775,9 @@ int getMixedStringWidth(const char *text, const uint8_t *accentFont) {
   for (const char *p = text; *p; p++) {
     unsigned char c = (unsigned char)*p;
     bool isAccent = isDanishAccentByte(c);
-    if (isAccent) u8g2.setFont(accentFont);
-    width += u8g2_GetGlyphWidth(u,c);
+    if (isAccent) u8g2.setFont(accentDonorFor(accentFont, c));
+    uint16_t ext = boardExtCodepointFor(c);
+    width += u8g2_GetGlyphWidth(u, ext ? ext : c);
     if (isAccent) u8g2.setFont(baseFont);
   }
   return width;

@@ -10,6 +10,7 @@
  */
 
 #include <rejseplanenClient.h>
+#include <boardText.h>
 #include <jsonListenerGS.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
@@ -72,26 +73,9 @@ static bool containsCaseInsensitive(const char* haystack, const char* needle) {
 // e.g. \xC3\xA6 (UTF-8 æ) becomes the single byte \xE6 (Latin-1 æ) - which the board then renders
 // with a real glyph, via setSmallFont()/setTallFont()/setTubeFont() switching to a Latin-1-aware
 // stock font for Danish modes (see "Departures Board.cpp").
+// (German ü/ß and the Czech/Slovak caron letters are handled by the same conversion - see boardText.h.)
 void rejseplanenClient::convertDanishToLatin1(char* input, size_t maxLen) {
-    if (!input || !input[0]) return;
-    char output[MAXLOCATIONSIZE*2];
-    size_t outPos = 0;
-    size_t len = strlen(input);
-    for (size_t i=0; i<len && outPos < sizeof(output)-1;) {
-        unsigned char c = (unsigned char)input[i];
-        if (c == 0xC3 && i+1 < len) {
-            unsigned char c2 = (unsigned char)input[i+1];
-            if (c2 >= 0x80 && c2 <= 0xBF) {
-                output[outPos++] = (char)(unsigned char)(0xC0 | (c2 & 0x3F)); // -> Latin-1 0xC0-0xFF
-                i += 2;
-                continue;
-            }
-        }
-        output[outPos++] = input[i];
-        i++;
-    }
-    output[outPos] = '\0';
-    strlcpy(input, output, maxLen);
+    convertUtf8ToBoardText(input, maxLen);
 }
 
 void rejseplanenClient::resetRawRecord() {
