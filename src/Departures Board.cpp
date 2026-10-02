@@ -3138,6 +3138,13 @@ void handleInfo(AsyncWebServerRequest *request) {
 
   message+="\nCurrent location code: " + String(locationCode) + "\nCurrent location name: " + String(locationName) + "\nSuccessful: " + String(dataLoadSuccess) + "\nFailures: " + String(dataLoadFailure) + "\nTime since last data load: " + String((int)((millis()-lastDataLoadTime)/1000)) + " seconds";
   if (dataLoadFailure) message+="\nTime since last failure: " + String((int)((millis()-lastLoadFailure)/1000)) + " seconds";
+  {
+    // Heap shape, to tell a leak (allocated blocks / bytes keep climbing cycle after cycle) from plain
+    // fragmentation (they stay level while the largest free block shrinks).
+    multi_heap_info_t hi;
+    heap_caps_get_info(&hi, MALLOC_CAP_8BIT);
+    message+="\nHeap blocks: allocated " + String(hi.allocated_blocks) + " (" + String(hi.total_allocated_bytes) + " bytes), free " + String(hi.free_blocks);
+  }
   if (emptyEventMillis) {
     message+="\nLast empty-board event: " + String((millis()-emptyEventMillis)/1000) + "s ago (loaded " + String(emptyEventLoaded) +
       ", after repeat-drop " + String(emptyEventAfterDrop) + ", fetch worker held " + String(emptyEventWorker) + ")";
@@ -3618,7 +3625,14 @@ void departureBoardLoop() {
     // it is reasonably fresh; if it's been a while since the last successful load, force one now and
     // wait for it rather than animating away a train whose delay may have simply grown further in
     // the meantime - re-evaluated fresh next time this runs, once that fetch lands.
-    bool dataFreshEnoughToTrust = (millis() - lastDataLoadTime) <= 20000UL;
+    // ...but not forever: if fetches keep failing (a network outage, or - as seen - this board's own
+    // memory too fragmented to open a connection at all), "wait for fresh data first" meant the board
+    // sat on the same overdue first departure for as long as the outage lasted, even with a whole list
+    // of later departures stored. Once a train is two minutes beyond the threshold with no fresh data to
+    // contradict it, it has gone - a delay that long and unconfirmed is far less likely than a stuck
+    // fetch - so step past it and keep working through the list; the next successful fetch replaces
+    // the whole list with the truth anyway.
+    bool dataFreshEnoughToTrust = (millis() - lastDataLoadTime) <= 20000UL || deltaSec <= departedThresholdSec - 120;
     if (deltaSec <= departedThresholdSec && !dataFreshEnoughToTrust) {
       if (millis() < nextDataUpdate) nextDataUpdate = millis();
     } else if (deltaSec <= departedThresholdSec && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
@@ -4912,6 +4926,21 @@ void loop(void) {
     }
   } else if (button.wasLongTapped() && longPressClock) {
     NSEclockIsActive = !NSEclockIsActive;
+  }
+
+  // Heap fragmentation self-heal. The secure fetch needs one ~20KB contiguous block (see
+  // MIN_SAFE_HEAP_FOR_FETCH); after hours of TLS handshakes the free memory can still total 45KB+ yet be
+  // in pieces too small for that, at which point every fetch is skipped and the board runs on stale data
+  // forever (seen: largest block 2.6KB, nothing fetched for 13 minutes, until someone power-cycled it).
+  // Fragmentation never clears by itself, so if it has blocked fetching for ten solid minutes, restart.
+  // Checked only every 10s; the restart happens between fetches so it can't interrupt one mid-flight.
+  static unsigned long lowHeapSince = 0, nextHeapCheck = 0;
+  if (millis() > nextHeapCheck) {
+    nextHeapCheck = millis() + 10000UL;
+    if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < MIN_SAFE_HEAP_FOR_FETCH) {
+      if (!lowHeapSince) lowHeapSince = millis();
+      else if (millis() - lowHeapSince > 600000UL && !fetchInProgress) ESP.restart();
+    } else lowHeapSince = 0;
   }
 
   if (millis()-lastTimeUpdate >= 100) {

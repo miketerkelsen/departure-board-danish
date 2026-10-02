@@ -11,6 +11,13 @@
 
 #include <rejseplanenClient.h>
 #include <boardText.h>
+
+#define MAXCONNECTTRIES 3
+// A TLS handshake is allowed 120 SECONDS by default, and the connect loops below used to retry up to
+// 10 times - so on a weak link where the TCP connection opens but the encrypted handshake stalls, a single
+// fetch could hang for many minutes holding ~50KB of connection buffers (seen: a board stuck 13 minutes
+// mid-fetch, showing an overdue departure, with its memory too fragmented to retry). A normal handshake
+// takes 1-2 seconds, so 10 is generous; 3 attempts bounds the whole connect phase to about a minute.
 #include <jsonListenerGS.h>
 #include <WiFiClientSecure.h>
 #include <time.h>
@@ -657,14 +664,15 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     httpsClient.setInsecure();
     httpsClient.setTimeout(8000);
     httpsClient.setConnectionTimeout(8000);
+        httpsClient.setHandshakeTimeout(10);   // seconds - see MAXCONNECTTRIES's comment
     httpsClient.setNoDelay(false);
 
     int retryCounter = 0;
-    while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 10)) {
+    while ((!httpsClient.connect(rjHost,443)) && (retryCounter < MAXCONNECTTRIES)) {
         delay(100);
         retryCounter++;
     }
-    if (retryCounter>=10) {
+    if (retryCounter>=MAXCONNECTTRIES) {
         strcpy(js->lastResultMessage,"Error: Connect timed out");
         return UPD_NO_RESPONSE;
     }
@@ -901,13 +909,14 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
         httpsClient.setInsecure();
         httpsClient.setTimeout(8000);
         httpsClient.setConnectionTimeout(8000);
+        httpsClient.setHandshakeTimeout(10);   // seconds - see MAXCONNECTTRIES's comment
         httpsClient.setNoDelay(false);
         int retryCounter = 0;
-        while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 10)) {
+        while ((!httpsClient.connect(rjHost,443)) && (retryCounter < MAXCONNECTTRIES)) {
             delay(100);
             retryCounter++;
         }
-        if (retryCounter>=10) {
+        if (retryCounter>=MAXCONNECTTRIES) {
             logResult("CD:conn-fail %lums ",millis()-tStart);
             return UPD_NO_RESPONSE;
         }
@@ -916,6 +925,10 @@ int rejseplanenClient::getServiceDetails(WiFiClientSecure &httpsClient, const ch
 
     // URL-encode the ref token (it's built from #, |, spaces and digits/letters only)
     String encodedRef;
+    // One allocation up front instead of growing the String ~200 times - every growth step is a
+    // realloc that can leave a hole behind, and this runs every calling-at fetch (see the heap
+    // fragmentation notes at MIN_SAFE_HEAP_FOR_FETCH).
+    encodedRef.reserve(strlen(ref)*3+1);
     for (size_t i=0; i<strlen(ref); ++i) {
         char ch = ref[i];
         if (isalnum((unsigned char)ch)) encodedRef += ch;
@@ -1113,13 +1126,14 @@ int rejseplanenClient::findMetroTripRef(WiFiClientSecure &httpsClient, const cha
         httpsClient.setInsecure();
         httpsClient.setTimeout(8000);
         httpsClient.setConnectionTimeout(8000);
+        httpsClient.setHandshakeTimeout(10);   // seconds - see MAXCONNECTTRIES's comment
         httpsClient.setNoDelay(false);
         int retryCounter = 0;
-        while ((!httpsClient.connect(rjHost,443)) && (retryCounter < 10)) {
+        while ((!httpsClient.connect(rjHost,443)) && (retryCounter < MAXCONNECTTRIES)) {
             delay(100);
             retryCounter++;
         }
-        if (retryCounter>=10) {
+        if (retryCounter>=MAXCONNECTTRIES) {
             logResult("TR:conn-fail ");
             return UPD_NO_RESPONSE;
         }
@@ -1325,6 +1339,7 @@ String rejseplanenClient::searchStops(const char *query, const char *accessId, i
     httpsClient.setInsecure();
     httpsClient.setTimeout(6000);
     httpsClient.setConnectionTimeout(6000);
+    httpsClient.setHandshakeTimeout(10);   // seconds - see MAXCONNECTTRIES's comment
     httpsClient.setNoDelay(false);
 
     int retryCounter = 0;
