@@ -379,6 +379,12 @@ static int dataLoadSuccess = 0;            // Count of successful data downloads
 static int dataLoadFailure = 0;            // Count of failed data downloads
 static unsigned long lastLoadFailure = 0;  // When the last failure occurred
 static bool noDataLoaded = true;           // True if no data received for the location
+// Last time the rail board ended up with nothing to show straight after a 'successful' load - kept so /info can
+// say what happened. Count of departures loaded, count left after dropping already-departed repeats, and the
+// fetch worker's own count at that moment.
+static uint32_t emptyEventMillis = 0;
+static uint8_t emptyEventLoaded = 0, emptyEventAfterDrop = 0, emptyEventWorker = 0;
+static uint8_t noDataFailureStreak = 0;    // Consecutive failed loads while noDataLoaded - see showNoDataScreen()'s callers
 static unsigned long lastDataLoadTime = 0; // Timestamp of last data load
 static long apiRefreshRate = DATAUPDATEINTERVAL; // User selected refresh rate for National Rail API (90/45 secs)
 
@@ -1902,6 +1908,7 @@ void softResetBoard(boardModes requestedMode) {
   forcedSleep = false;
   firstLoad = true;
   noDataLoaded = true;
+  noDataFailureStreak = 0;
   viaTimer = 0;
   timer = 0;
   serviceTimer = 0;
@@ -2601,6 +2608,7 @@ void drawStationBoard() {
 
 void updateRailDepartures() {
   rejseplanenData.loadDepartures(&station,&messages);
+  emptyEventLoaded = station.numServices;
   // Rejseplanen doesn't always retire a service from its own departureBoard response as promptly as
   // a normal train clears in real life - a cancelled one in particular can keep being returned well
   // after it already played its departed-train animation here. The fingerprint guard on that
@@ -2635,7 +2643,7 @@ void updateRailDepartures() {
     station.nextCallingKnown = false;
   }
   lastDataLoadTime = millis();
-  noDataLoaded = false;
+  noDataLoaded = false; noDataFailureStreak = 0;
   dataLoadSuccess++;
 }
 
@@ -2681,7 +2689,7 @@ bool drawCurrentTimeUG() {
 void updateArrivals() {
   rejseplanenData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
-  noDataLoaded = false;
+  noDataLoaded = false; noDataFailureStreak = 0;
   dataLoadSuccess++;
 }
 
@@ -2874,7 +2882,7 @@ void drawBusDeparturesBoard() {
 void updateBusDepartures() {
   rejseplanenData.loadDepartures(&station,&messages);
   lastDataLoadTime = millis();
-  noDataLoaded = false;
+  noDataLoaded = false; noDataFailureStreak = 0;
   dataLoadSuccess++;
   // Work out the max column size for service numbers
   busDestX=0;
@@ -3122,6 +3130,10 @@ void handleInfo(AsyncWebServerRequest *request) {
 
   message+="\nCurrent location code: " + String(locationCode) + "\nCurrent location name: " + String(locationName) + "\nSuccessful: " + String(dataLoadSuccess) + "\nFailures: " + String(dataLoadFailure) + "\nTime since last data load: " + String((int)((millis()-lastDataLoadTime)/1000)) + " seconds";
   if (dataLoadFailure) message+="\nTime since last failure: " + String((int)((millis()-lastLoadFailure)/1000)) + " seconds";
+  if (emptyEventMillis) {
+    message+="\nLast empty-board event: " + String((millis()-emptyEventMillis)/1000) + "s ago (loaded " + String(emptyEventLoaded) +
+      ", after repeat-drop " + String(emptyEventAfterDrop) + ", fetch worker held " + String(emptyEventWorker) + ")";
+  }
   if (apiBudgetPacingEnabled) {
     unsigned long pacedMs = computePacedIntervalMs();
     unsigned long effectiveMs = pacedMs > (unsigned long)apiRefreshRate ? pacedMs : (unsigned long)apiRefreshRate;
@@ -3376,7 +3388,14 @@ void departureBoardLoop() {
     }
   }
 
-  if (fetchComplete && lastUpdateResult != UPD_SEC_CHANGE && !isScrollingService && !isSleeping && !trainDepartedAnimating) {
+  // Never apply a finished result while another fetch is running: the fetch worker (Core 0) starts every
+  // fetch by emptying its shared result buffer (rejseplanenClient's xStation) and then fills it in as it
+  // parses, and applying a result copies straight out of that buffer. A result that was finished but
+  // deferred for a moment (a calling-at line mid-scroll, the departed-train animation, ...) could be
+  // applied just after the NEXT fetch had begun - copying an empty or half-built list, and showing
+  // "Der er ingen planlagte afgange" until that fetch finished and the board redrew itself. Waiting for
+  // the running fetch to finish applies the fresher result instead, and the stale one is simply skipped.
+  if (fetchComplete && !fetchInProgress && lastUpdateResult != UPD_SEC_CHANGE && !isScrollingService && !isSleeping && !trainDepartedAnimating) {
     if (!isScrollingStops || (!showFullCalling && isShowingCalling) || (!showFullMsgs && !isShowingCalling)) {
       fetchComplete = false;
       // Get the update data if there is any
@@ -3384,14 +3403,23 @@ void departureBoardLoop() {
         // Retrieve the updated data
         updateRailDepartures();
         drawStationBoard();
+        if (!station.numServices) {
+          emptyEventMillis = millis() ? millis() : 1;
+          emptyEventAfterDrop = station.numServices;
+          emptyEventWorker = xfrStation.numServices;
+        }
       } else if (lastUpdateResult == UPD_NO_CHANGE) {
         lastDataLoadTime = millis();
-        noDataLoaded = false;
+        noDataLoaded = false; noDataFailureStreak = 0;
         dataLoadSuccess++;
       } else if (lastUpdateResult == UPD_DATA_ERROR || lastUpdateResult == UPD_TIMEOUT || lastUpdateResult == UPD_HTTP_ERROR) {
         lastLoadFailure=millis();
         dataLoadFailure++;
-        if (noDataLoaded) showNoDataScreen();
+        // The first fetch after a board reset (waking from sleep, a tap, saving settings, a scheduler switch)
+        // failing once or twice is routine on a weak WiFi link and recovers within seconds - the screen
+        // already showing is the startup/progress screen, which is the honest thing to leave up. The
+        // "no data for this stop-id, check your config" screen is for when it's really not working.
+        if (noDataLoaded && ++noDataFailureStreak >= 4) showNoDataScreen();
       } else if (lastUpdateResult == UPD_UNAUTHORISED) {
         showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
       } else {
@@ -3707,6 +3735,14 @@ void departureBoardLoop() {
         buildServiceMessages();
         currentMessage = numMessages-1;
         isScrollingStops = false;
+      } else {
+        // The locally-held list ran out before a fresh fetch landed (a fetch failed or is still in
+        // flight). Leaving the cleared row blank looked exactly like "no data" - say what's actually
+        // happening instead. The next successful drawStationBoard() clears this away again.
+        setTallFont();
+        centreText("Opdaterer afgange...",LINE1-1);
+        setSmallFont();
+        u8g2.updateDisplayArea(0,1,32,3);
       }
       // The "next departures" row(s) below the primary aren't tied to this animation at all - they're
       // driven by their own independent timer (serviceTimer/line3Service), so without this, whatever
@@ -3729,7 +3765,11 @@ void departureBoardLoop() {
       // lookup keeps failing) leaves callingKnown false indefinitely, and this would then fire a full
       // API request after EVERY departure - Metro runs every few minutes, so that would burn quota
       // fast. Metro just waits for its normal schedule instead.
-      if (!station.callingKnown && boardMode != MODE_METRO) nextDataUpdate = millis();
+      // An EMPTY list is the exception to the Metro rule above: the board has nothing to show at all
+      // until a fetch lands, and Metro in particular only ever publishes about four minutes of
+      // upcoming departures, so one missed fetch is enough to get here. Bounded - a refetch that
+      // fails goes through nextFetchDelay()'s capped fast-retry like any other empty-board failure.
+      if ((!station.callingKnown && boardMode != MODE_METRO) || !station.numServices) nextDataUpdate = millis();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
@@ -3787,7 +3827,7 @@ void undergroundArrivalsLoop() {
     fullRefresh = true;
   }
 
-  if (fetchComplete && lastUpdateResult != UPD_NO_CHANGE && (!isScrollingService || !showFullMsgs) && !isScrollingPrimary && !isSleeping) {
+  if (fetchComplete && !fetchInProgress && lastUpdateResult != UPD_NO_CHANGE && (!isScrollingService || !showFullMsgs) && !isScrollingPrimary && !isSleeping) {   // !fetchInProgress: see departureBoardLoop()
     fetchComplete = false;
     isScrollingService = false;
     // Get the updated data
@@ -3797,7 +3837,9 @@ void undergroundArrivalsLoop() {
     } else if (lastUpdateResult == UPD_DATA_ERROR || lastUpdateResult == UPD_TIMEOUT || lastUpdateResult == UPD_HTTP_ERROR) {
       lastLoadFailure = millis();
       dataLoadFailure++;
-      if (noDataLoaded) showNoDataScreen(); else drawUndergroundBoard();
+      // Right after a reset a failed first fetch just leaves the startup screen up (see the rail
+      // loop's matching handler); the "no data" screen only appears after several failures in a row.
+      if (noDataLoaded) { if (++noDataFailureStreak >= 4) showNoDataScreen(); } else drawUndergroundBoard();
     } else if (lastUpdateResult == UPD_UNAUTHORISED) {
       showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
     } else {
@@ -3968,7 +4010,7 @@ void busDeparturesLoop() {
     fullRefresh = true;
   }
 
-  if (fetchComplete && lastUpdateResult != UPD_NO_CHANGE && !isScrollingService && !isScrollingPrimary && !isSleeping) {
+  if (fetchComplete && !fetchInProgress && lastUpdateResult != UPD_NO_CHANGE && !isScrollingService && !isScrollingPrimary && !isSleeping) {   // !fetchInProgress: see departureBoardLoop()
     fetchComplete = false;
     if (lastUpdateResult == UPD_SUCCESS) {
       updateBusDepartures();
@@ -3976,7 +4018,9 @@ void busDeparturesLoop() {
     } else if (lastUpdateResult == UPD_DATA_ERROR || lastUpdateResult == UPD_TIMEOUT || lastUpdateResult == UPD_HTTP_ERROR) {
       lastLoadFailure = millis();
       dataLoadFailure++;
-      if (noDataLoaded) showNoDataScreen(); else drawBusDeparturesBoard();
+      // Right after a reset a failed first fetch just leaves the startup screen up (see the rail
+      // loop's matching handler); the "no data" screen only appears after several failures in a row.
+      if (noDataLoaded) { if (++noDataFailureStreak >= 4) showNoDataScreen(); } else drawBusDeparturesBoard();
     } else if (lastUpdateResult == UPD_UNAUTHORISED) {
       showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
     } else {
@@ -4215,7 +4259,7 @@ void odenseBusLoop() {
 
   if (fetchComplete && updateIconVisible) showUpdateIcon(false);
 
-  if (fetchComplete && !isSleeping) {
+  if (fetchComplete && !fetchInProgress && !isSleeping) {   // !fetchInProgress: see departureBoardLoop()
     fetchComplete = false;
     if (lastUpdateResult == UPD_SUCCESS || lastUpdateResult == UPD_NO_CHANGE) {
       if (lastUpdateResult == UPD_SUCCESS) updateBusDepartures();
@@ -4223,7 +4267,9 @@ void odenseBusLoop() {
     } else if (lastUpdateResult == UPD_DATA_ERROR || lastUpdateResult == UPD_TIMEOUT || lastUpdateResult == UPD_HTTP_ERROR) {
       lastLoadFailure = millis();
       dataLoadFailure++;
-      if (noDataLoaded) showNoDataScreen(); else drawOdenseBusBoard();
+      // Right after a reset a failed first fetch just leaves the startup screen up (see the rail
+      // loop's matching handler); the "no data" screen only appears after several failures in a row.
+      if (noDataLoaded) { if (++noDataFailureStreak >= 4) showNoDataScreen(); } else drawOdenseBusBoard();
     } else if (lastUpdateResult == UPD_UNAUTHORISED) {
       showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
     } else {
