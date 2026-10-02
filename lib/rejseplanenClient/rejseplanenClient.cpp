@@ -446,6 +446,32 @@ int rejseplanenClient::readResponseHeaders(WiFiClientSecure &client, long &conte
 
     String statusLine = client.readStringUntil('\n');
     if (!statusLine.startsWith("HTTP/") || statusLine.indexOf("200 OK") == -1) {
+        // Record exactly what the server said ("401 Unauthorized", ...) - the result code alone
+        // ("HTTP status 2") told nobody why a board had stopped working.
+        String shown = statusLine;
+        shown.trim();
+        if (shown.startsWith("HTTP/1.1 ")) shown.remove(0,9);
+        char errorCode[20] = "";
+        if (statusLine.indexOf("401") > 0 || statusLine.indexOf("403") > 0) {
+            // The rejection body carries the API's own reason, e.g. {"errorCode":"API_AUTH",...} -
+            // scan the next ~1.5KB / 1.5s for it with a tiny matcher rather than buffering anything.
+            const char *pat = "\"errorCode\":\"";
+            size_t pi = 0, ei = 0, plen = strlen(pat);
+            bool capturing = false;
+            unsigned long dl = millis() + 1500UL;
+            int budget = 1500;
+            while (millis() < dl && budget > 0 && ei < sizeof(errorCode)-1) {
+                if (client.available()) {
+                    char c = client.read();
+                    budget--;
+                    if (capturing) { if (c == '"') break; errorCode[ei++] = c; errorCode[ei] = '\0'; }
+                    else if (c == pat[pi]) { if (++pi == plen) capturing = true; }
+                    else pi = (c == pat[0]) ? 1 : 0;
+                } else if (!client.connected()) break;
+                else delay(5);
+            }
+        }
+        logResult("HTTP %.30s %s", shown.c_str(), errorCode);
         if (statusLine.indexOf("401") > 0 || statusLine.indexOf("403") > 0) return UPD_UNAUTHORISED;
         else if (statusLine.indexOf("500") > 0) return UPD_DATA_ERROR;
         else return UPD_HTTP_ERROR;
@@ -680,7 +706,7 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
     if (headerResult != UPD_SUCCESS) {
         httpsClient.stop();
         if (headerResult == UPD_TIMEOUT) strcpy(js->lastResultMessage,"Error: GET timed out");
-        else sprintf(js->lastResultMessage,"Error: HTTP status %d",headerResult);
+        else if (!js->lastResultMessage[0]) sprintf(js->lastResultMessage,"Error: HTTP status %d",headerResult);
         return headerResult;
     }
 

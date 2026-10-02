@@ -1255,6 +1255,13 @@ void showSetupCrsHelpScreen() {
   u8g2.sendBuffer();
 }
 
+// Shown when Rejseplanen answers 401/403. Used to be followed by an endless loop in every board mode -
+// a bad key was assumed to mean nothing would ever work again - but a single rejected request is not
+// necessarily a bad key (the API gave one board a rejection while the very same key was answering
+// normally minutes later), and that loop froze the whole board until it was power-cycled. Now the
+// screen is shown and the board keeps running: nextFetchDelay() retries every few minutes, and the
+// first answer that succeeds redraws everything. firstLoad is set so that redraw starts from a clean
+// screen rather than painting over this one.
 void showTokenErrorScreen() {
   char msg[60];
   noServiceClockIsActive = false;
@@ -1267,6 +1274,7 @@ void showTokenErrorScreen() {
   sprintf(msg,"%s/keys.htm",myUrl);
   centreText(msg,40);
   u8g2.sendBuffer();
+  firstLoad = true;
 }
 
 void showCRSErrorScreen() {
@@ -3332,7 +3340,7 @@ void handleDkStationPicker(AsyncWebServerRequest *request) {
 //
 void departureBoardLoop() {
 
-  if (millis() > nextDataUpdate && !fetchInProgress && lastUpdateResult != UPD_UNAUTHORISED && !isSleeping && wifiConnected) {
+  if (millis() > nextDataUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
     if (!firstLoad) showUpdateIcon(true);
     // Initiate a background update on Core 0
     fetchMode = FETCH_BOARD;
@@ -3385,8 +3393,7 @@ void departureBoardLoop() {
         dataLoadFailure++;
         if (noDataLoaded) showNoDataScreen();
       } else if (lastUpdateResult == UPD_UNAUTHORISED) {
-        showTokenErrorScreen();
-        while (true) { delay(1);}
+        showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
       } else {
         dataLoadFailure++;
       }
@@ -3792,8 +3799,7 @@ void undergroundArrivalsLoop() {
       dataLoadFailure++;
       if (noDataLoaded) showNoDataScreen(); else drawUndergroundBoard();
     } else if (lastUpdateResult == UPD_UNAUTHORISED) {
-      showTokenErrorScreen();
-      while (true) delay(10);
+      showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
     } else {
       dataLoadFailure++;
     }
@@ -3972,8 +3978,7 @@ void busDeparturesLoop() {
       dataLoadFailure++;
       if (noDataLoaded) showNoDataScreen(); else drawBusDeparturesBoard();
     } else if (lastUpdateResult == UPD_UNAUTHORISED) {
-      showTokenErrorScreen();
-      while (true) delay(10);
+      showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
     } else {
       dataLoadFailure++;
     }
@@ -4220,8 +4225,7 @@ void odenseBusLoop() {
       dataLoadFailure++;
       if (noDataLoaded) showNoDataScreen(); else drawOdenseBusBoard();
     } else if (lastUpdateResult == UPD_UNAUTHORISED) {
-      showTokenErrorScreen();
-      while (true) delay(10);
+      showTokenErrorScreen();   // and carry on - see showTokenErrorScreen()/nextFetchDelay() for why this must not hang
     } else {
       dataLoadFailure++;
     }
@@ -4408,6 +4412,9 @@ unsigned long nextFetchDelay() {
   static uint8_t consecutiveFailures = 0;
   if (isFailure) { if (consecutiveFailures < 255) consecutiveFailures++; } else consecutiveFailures = 0;
   if (isFailure && station.numServices==0 && consecutiveFailures <= 3) return 5000UL;
+  // Access denied: retry, but slowly. If the key really is invalid every retry fails identically, so
+  // keep them cheap (144 a day); if it was a transient rejection, the board is back within minutes.
+  if (lastUpdateResult == UPD_UNAUTHORISED) return 600000UL;
   unsigned long pacedMs = computePacedIntervalMs();
   return pacedMs > (unsigned long)apiRefreshRate ? pacedMs : (unsigned long)apiRefreshRate;
 }
