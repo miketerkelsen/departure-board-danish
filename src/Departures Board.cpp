@@ -376,6 +376,8 @@ static int prevProgressBarPosition=0;      // Used for progress bar smooth anima
 static int startupProgressPercent;         // Initialisation progress
 static bool wifiConnected = false;         // Connected to WiFi?
 volatile unsigned long nextDataUpdate = 0; // Next National Rail update time (millis)
+volatile unsigned long lastFetchOkMillis = 0; // When the last SUCCESSFUL board fetch finished - set by the fetch task itself,
+                                              // so it's true even while the result is still waiting to be applied
 static int dataLoadSuccess = 0;            // Count of successful data downloads
 static int dataLoadFailure = 0;            // Count of failed data downloads
 static unsigned long lastLoadFailure = 0;  // When the last failure occurred
@@ -3362,12 +3364,28 @@ void handleDkStationPicker(AsyncWebServerRequest *request) {
  * Setup / Loop functions
 */
 
+// Asks for a fetch NOW rather than at the next scheduled time - used when the board has a reason not to
+// wait (the first departure has gone but the data is stale; the list ran dry; calling-at is unknown).
+// These bypass the refresh interval and so the monthly budget pacer, which is exactly why they must be
+// bounded: an unbounded version of this (asked for again on every pass of the main loop while a train
+// stayed overdue and "stale") sent ~150 requests per departed train - 22,000 in a day on the S-tog
+// board - see departureBoardLoop()'s departed-train check. So: at most one per 45 seconds, never while
+// a fetch is already running, and none at all once 95% of the month's budget is spent.
+static unsigned long lastEarlyFetchMillis = 0;
+static void requestEarlyFetch() {
+  if (fetchInProgress) return;
+  if (lastEarlyFetchMillis && millis() - lastEarlyFetchMillis < 45000UL) return;
+  if (apiBudgetPacingEnabled && apiMonthlyBudget && (unsigned long)apiUsageThisMonth * 100UL >= (unsigned long)apiMonthlyBudget * 95UL) return;
+  lastEarlyFetchMillis = millis();
+  nextDataUpdate = millis();
+}
+
 //
 // The main processing cycle for the National Rail Departures Board
 //
 void departureBoardLoop() {
 
-  if (millis() > nextDataUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+  if (millis() > nextDataUpdate && !fetchInProgress && !fetchComplete && !isSleeping && wifiConnected) {
     if (!firstLoad) showUpdateIcon(true);
     // Initiate a background update on Core 0
     fetchMode = FETCH_BOARD;
@@ -3632,9 +3650,12 @@ void departureBoardLoop() {
     // contradict it, it has gone - a delay that long and unconfirmed is far less likely than a stuck
     // fetch - so step past it and keep working through the list; the next successful fetch replaces
     // the whole list with the truth anyway.
-    bool dataFreshEnoughToTrust = (millis() - lastDataLoadTime) <= 20000UL || deltaSec <= departedThresholdSec - 120;
+    // "Fresh" is judged from when the last good fetch FINISHED, not when the display got round to applying
+    // it (lastDataLoadTime): a result can sit waiting for a calling-at line to finish scrolling, and
+    // judging by the apply time called perfectly fresh data stale, which forced yet another fetch.
+    bool dataFreshEnoughToTrust = (millis() - lastDataLoadTime) <= 20000UL || (millis() - lastFetchOkMillis) <= 20000UL || deltaSec <= departedThresholdSec - 120;
     if (deltaSec <= departedThresholdSec && !dataFreshEnoughToTrust) {
-      if (millis() < nextDataUpdate) nextDataUpdate = millis();
+      if (millis() < nextDataUpdate && !fetchComplete) requestEarlyFetch();
     } else if (deltaSec <= departedThresholdSec && strcmp(trainDepartedFingerprint,fingerprint)!=0) {
       strlcpy(trainDepartedFingerprint,fingerprint,sizeof(trainDepartedFingerprint));
       trainDepartedAnimating = true;
@@ -3791,7 +3812,7 @@ void departureBoardLoop() {
       // until a fetch lands, and Metro in particular only ever publishes about four minutes of
       // upcoming departures, so one missed fetch is enough to get here. Bounded - a refetch that
       // fails goes through nextFetchDelay()'s capped fast-retry like any other empty-board failure.
-      if ((!station.callingKnown && boardMode != MODE_METRO) || !station.numServices) nextDataUpdate = millis();
+      if ((!station.callingKnown && boardMode != MODE_METRO) || !station.numServices) requestEarlyFetch();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
@@ -3822,7 +3843,7 @@ void departureBoardLoop() {
 void undergroundArrivalsLoop() {
   bool fullRefresh = false;
 
-  if (millis()>nextDataUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+  if (millis()>nextDataUpdate && !fetchInProgress && !fetchComplete && !isSleeping && wifiConnected) {
     if (!firstLoad) showUpdateIcon(true);
     // Initiate a background update on Core 0
     fetchMode = FETCH_BOARD;
@@ -4005,7 +4026,7 @@ void undergroundArrivalsLoop() {
 void busDeparturesLoop() {
   bool fullRefresh = false;
 
-  if (millis()>nextDataUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+  if (millis()>nextDataUpdate && !fetchInProgress && !fetchComplete && !isSleeping && wifiConnected) {
     if (!firstLoad) showUpdateIcon(true);
     // Initiate a background update on Core 0
     fetchMode = FETCH_BOARD;
@@ -4270,7 +4291,7 @@ void drawOdenseBusBoard() {
 // structure, but replaces its primary+rotating-third-slot layout with three independently-rotating
 // group lines.
 void odenseBusLoop() {
-  if (millis()>nextDataUpdate && !fetchInProgress && !isSleeping && wifiConnected) {
+  if (millis()>nextDataUpdate && !fetchInProgress && !fetchComplete && !isSleeping && wifiConnected) {
     if (!firstLoad) showUpdateIcon(true);
     fetchMode = FETCH_BOARD;
     fetchInProgress = true;
@@ -4535,6 +4556,7 @@ void fetchDeparturesTask(void *pvParameters) {
             nextDataUpdate = millis()+nextFetchDelay();
             break;
         }
+        if (lastUpdateResult == UPD_SUCCESS || lastUpdateResult == UPD_NO_CHANGE) lastFetchOkMillis = millis();
         fetchComplete = true;
         break;
 
