@@ -183,6 +183,16 @@ class rejseplanenClient: public JsonListenerGS {
         bool fetchingTrip = false;
         bool tripFound = false;
         int8_t tripWantIdx = -1;
+        // true while parsing a departureBoard fetched with passlist=1 (see fetchDepartures()'s stopsInBoard
+        // param): each Departure then carries its own Stops/Stop[] list, and these accumulate it straight
+        // into that departure's rdiService::calling while it is being parsed - no separate journeyDetail
+        // request per train. boardStopsSeen counts the Stop entries of the current departure (the first is the
+        // board's own stop, which isn't a "calling at"), boardStopPending says the Stop element being parsed
+        // has produced values to flush when it closes, and boardStopId is the board's own stop id.
+        bool boardStopsMode = false;
+        bool boardStopPending = false;
+        uint8_t boardStopsSeen = 0;
+        const char *boardStopId = nullptr;
         bool inTargetArray = false;    // inside the "Departure" (or "Stops/Stop") array
         int arrayDepth = 0;
 
@@ -315,6 +325,7 @@ class rejseplanenClient: public JsonListenerGS {
         void resetRawRecord();
         void finaliseDepartureRecord();
         void finaliseTripLeg();
+        void appendBoardStop();
         // Appends printf-style text to js->lastResultMessage, truncating instead of overflowing - that
         // buffer is only 80 bytes and a Metro cycle can log several calling-at fetches into it.
         void logResult(const char *fmt, ...);
@@ -379,7 +390,12 @@ class rejseplanenClient: public JsonListenerGS {
         // default (false) and behaves exactly as before.
         // metroOnly: MODE_METRO passes true - see metroOnlyFilter's own comment. Every other mode
         // leaves this at its default (false).
-        int fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache = false, bool metroOnly = false);
+        // stopsInBoard: MODE_DKRAIL passes true. Asks the departureBoard for passlist=1, which returns every
+        // departure's stop list inside the SAME response (about 3.4x the bytes), instead of one separate
+        // journeyDetail request per train. Measured on a Tog board that those separate requests were ~70% of
+        // all its API requests once the refresh interval was paced. Trains that split (a destination with
+        // "og" in it) still use journeyDetail, since only it carries the split-point information.
+        int fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache = false, bool metroOnly = false, bool stopsInBoard = false);
         void loadDepartures(rdStation *station, stnMessages *messages);
         // Looks up calling-at for a given line+destination directly from the persistent S-tog cache
         // (see LineDirCallingEntry), with NO network activity - a pure local lookup. Returns true

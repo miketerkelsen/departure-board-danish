@@ -193,6 +193,35 @@ void rejseplanenClient::finaliseDepartureRecord() {
     xStation->numServices++;
 }
 
+// Called when a Stop element of a departure's Stops list closes (see stopsInBoard): adds it to the
+// "calling at" text of the departure currently being parsed - which is the rdiService slot at
+// numServices, not yet counted - in the same "Name (HH:MM)" format getServiceDetails() builds from a
+// journeyDetail. The first Stop of every list is the board's own station, and isn't a calling point.
+void rejseplanenClient::appendBoardStop() {
+    boardStopPending = false;
+    if (xStation->numServices >= MAXBOARDSERVICES) return;
+    if (boardStopsSeen < 255) boardStopsSeen++;
+    if (boardStopsSeen == 1) return;
+    if (!stopScratchName[0]) return;
+    if (boardStopId && strcmp(stopScratchExtId, boardStopId) == 0) return;
+    char *calling = xStation->service[xStation->numServices].calling;
+    char entry[MAXLOCATIONSIZE + 10];
+    strlcpy(entry, stopScratchName, sizeof(entry));
+    convertDanishToLatin1(entry, sizeof(entry));
+    // Arrival time where there is one - same preference as finaliseCallingStop() - and no times at all on
+    // S-tog, as in getServiceDetails(). ProductAtStop comes before Stops in the JSON, so catOut is known.
+    const char *t = stopScratchArrTime[0] ? stopScratchArrTime : stopScratchDepTime;
+    if (t[0] && strlen(t) >= 5 && !containsCaseInsensitive(raw.catOut, "S-Tog")) {
+        size_t n = strlen(entry);
+        if (n + 9 < sizeof(entry)) snprintf(entry + n, sizeof(entry) - n, " (%.5s)", t);
+    }
+    size_t curLen = strlen(calling);
+    size_t addLen = strlen(entry) + (curLen ? 2 : 0);
+    if (curLen + addLen >= sizeof(xStation->service[0].calling)) return;
+    if (curLen) strcat(calling, ", ");
+    strcat(calling, entry);
+}
+
 // Called when a Trip/LegList/Leg record's closing '}' is seen while parsing /api/trip (see
 // findMetroTripRef()). Latches tripFound when this Leg is the line (and, for the M3 loop, the
 // direction) of xStation->service[tripWantIdx] - from then on raw.ref holds its journey reference
@@ -311,6 +340,13 @@ void rejseplanenClient::value(const char *value) {
         else if (strcmp(currentPath,"Departure/ProductAtStop/catCode")==0) raw.catCode = atoi(value);
         else if (strcmp(currentPath,"Departure/ProductAtStop/catOut")==0) strlcpy(raw.catOut,value,sizeof(raw.catOut));
         else if (strcmp(currentPath,"Departure/ProductAtStop/operator")==0) strlcpy(raw.opco,value,sizeof(raw.opco));
+        else if (boardStopsMode && strncmp(currentPath,"Departure/Stops/Stop/",21)==0) {
+            const char *f = currentPath + 21;
+            if (strcmp(f,"name")==0) { strlcpy(stopScratchName,value,sizeof(stopScratchName)); boardStopPending = true; }
+            else if (strcmp(f,"extId")==0) strlcpy(stopScratchExtId,value,sizeof(stopScratchExtId));
+            else if (strcmp(f,"arrTime")==0) strlcpy(stopScratchArrTime,value,sizeof(stopScratchArrTime));
+            else if (strcmp(f,"depTime")==0) strlcpy(stopScratchDepTime,value,sizeof(stopScratchDepTime));
+        }
     } else {
         if (strcmp(currentPath,"Stops/Stop/name")==0) strlcpy(stopScratchName,value,sizeof(stopScratchName));
         else if (strcmp(currentPath,"Stops/Stop/extId")==0) strlcpy(stopScratchExtId,value,sizeof(stopScratchExtId));
@@ -372,7 +408,14 @@ void rejseplanenClient::startObject() {
 
     if (isNewTargetElement) {
         if (searchingStops) { stopSearchName[0] = '\0'; stopSearchExtId[0] = '\0'; }
-        else if (fetchingDepartures) resetRawRecord();
+        else if (fetchingDepartures) {
+            resetRawRecord();
+            if (boardStopsMode) {
+                boardStopsSeen = 0;
+                boardStopPending = false;
+                if (xStation->numServices < MAXBOARDSERVICES) xStation->service[xStation->numServices].calling[0] = 0;
+            }
+        }
         else if (fetchingTrip) { if (!tripFound) resetRawRecord(); }
         else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; stopScratchRouteIdx = -1; }
     }
@@ -404,6 +447,15 @@ void rejseplanenClient::startObject() {
     // and corrupting every subsequent record boundary. Fields nested deeper than MAXPATHSTACK
     // just won't build a full/matchable path (harmless - nothing we parse lives that deep), but
     // the depth bookkeeping itself must never drift.
+    // A new Stop element inside a departure's Stops list (passlist=1): depth arrayBaseDepth+2 is the Stops
+    // object's own body, and a Stop is the only thing keyed "Stop" at that depth.
+    if (boardStopsMode && fetchingDepartures && inTargetArray && stackTop == arrayBaseDepth + 2 && strcmp(keyToPush,"Stop")==0) {
+        stopScratchName[0] = 0;
+        stopScratchExtId[0] = 0;
+        stopScratchArrTime[0] = 0;
+        stopScratchDepTime[0] = 0;
+        boardStopPending = false;
+    }
     if (keyToPush[0]) {
         if (stackTop < MAXPATHSTACK) strlcpy(pathStack[stackTop], keyToPush, sizeof(pathStack[0]));
         stackTop++;
@@ -412,6 +464,10 @@ void rejseplanenClient::startObject() {
 
 void rejseplanenClient::endObject() {
     if (stackTop > 0) stackTop--;
+    // A Stop element of a departure's Stops list has just closed (after the pop its depth is
+    // arrayBaseDepth+2; the pending flag keeps the other sub-objects that also close at that depth, such
+    // as ProductAtStop's icon, from being mistaken for one).
+    if (boardStopsMode && boardStopPending && fetchingDepartures && inTargetArray && stackTop == arrayBaseDepth + 2) appendBoardStop();
     if (inTargetArray && stackTop == arrayBaseDepth) {
         if (searchingStops) finaliseStopSearchResult();
         else if (fetchingDepartures) finaliseDepartureRecord();
@@ -577,12 +633,16 @@ long rejseplanenClient::readResponseBody(WiFiClientSecure &client, long contentL
 //
 // Fetches the departure board for a stop and (optionally) the calling points for the first service
 //
-int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache, bool metroOnly) {
+int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages, const char *stopId, const char *accessId, int numRows, int productsMask, bool fetchCallingPoints, const char *callingStopId, int timeOffsetMins, bool useLineDirCache, bool metroOnly, bool stopsInBoard) {
 
     unsigned long perfTimer = millis();
     bool bChunked = false;
     js->lastResultMessage[0] = '\0';
     metroOnlyFilter = metroOnly;
+    boardStopsMode = stopsInBoard && fetchCallingPoints;   // see stopsInBoard's comment in the header
+    boardStopId = stopId;
+    boardStopPending = false;
+    boardStopsSeen = 0;
 
     // See MIN_SAFE_HEAP_FOR_FETCH's own comment - refuse to open a new TLS connection at all while
     // the heap is already too fragmented to safely support one. Checked before anything else in this
@@ -687,6 +747,8 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         request += "&time=" + String(timeParam);
     }
     if (callingStopId && callingStopId[0]) request += "&direction=" + String(callingStopId);
+    // passlist=1: every departure's stop list comes back inside this one response - see stopsInBoard.
+    if (boardStopsMode) request += "&passlist=1";
     request += " HTTP/1.1\r\nHost: " + String(rjHost) + "\r\nConnection: keep-alive\r\n\r\n";
 
     httpsClient.print(request);
@@ -710,7 +772,8 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
 
     perfTimer = millis();
     bool bodyTimedOut = false;
-    long dataReceived = readResponseBody(httpsClient, contentLength, bChunked, parser, 12000UL, bodyTimedOut);
+    // ~84KB with the stop lists in it instead of ~25KB, so allow it a longer window to arrive.
+    long dataReceived = readResponseBody(httpsClient, contentLength, bChunked, parser, boardStopsMode ? 25000UL : 12000UL, bodyTimedOut);
 
     // Only safe to hand this same connection to getServiceDetails() below when the server didn't ask
     // to close it, the body actually finished (not abandoned mid-read), and the socket's still up -
@@ -795,7 +858,13 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         strcmp(xStation->service[0].sTime,station->service[0].sTime)==0 &&
         strcmp(xStation->service[0].destination,station->service[0].destination)==0 &&
         strcmp(xStation->service[0].serviceID,station->service[0].serviceID)==0;
-    if (lineDirIdx >= 0) {
+    // Stops that arrived with the board itself (stopsInBoard) are used as-is - no request at all. Except
+    // for a train that splits (destination like "Soenderborg St. og Aalborg Lufthavn St."): the split
+    // point only exists in journeyDetail's Directions, so those still go the per-train route below.
+    bool dual0 = xStation->numServices && strstr(xStation->service[0].destination, " og ") != nullptr;
+    if (boardStopsMode && xStation->numServices && xStation->service[0].calling[0] && !dual0) {
+        callingFetchKnown = true;
+    } else if (lineDirIdx >= 0) {
         portENTER_CRITICAL(&lineDirCacheMux);
         strlcpy(xStation->service[0].calling, lineDirCache[lineDirIdx].calling, sizeof(xStation->service[0].calling));
         strlcpy(xStation->service[0].origin, lineDirCache[lineDirIdx].origin, sizeof(xStation->service[0].origin));
@@ -846,7 +915,10 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
             strcmp(xStation->service[1].sTime,station->service[1].sTime)==0 &&
             strcmp(xStation->service[1].destination,station->service[1].destination)==0 &&
             strcmp(xStation->service[1].serviceID,station->service[1].serviceID)==0;
-        if (lineDirIdx1 >= 0) {
+        bool dual1 = strstr(xStation->service[1].destination, " og ") != nullptr;
+        if (boardStopsMode && xStation->service[1].calling[0] && !dual1) {
+            nextCallingFetchKnown = true;
+        } else if (lineDirIdx1 >= 0) {
             portENTER_CRITICAL(&lineDirCacheMux);
             strlcpy(xStation->service[1].calling, lineDirCache[lineDirIdx1].calling, sizeof(xStation->service[1].calling));
             strlcpy(xStation->service[1].origin, lineDirCache[lineDirIdx1].origin, sizeof(xStation->service[1].origin));

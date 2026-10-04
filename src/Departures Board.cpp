@@ -2128,6 +2128,36 @@ void drawTrainIcon(int x, int y) {
 // very departure that just animated away, looking like nothing happened. A plain struct copy is
 // safe here (rdService has no pointers/dynamic members); this is only ever a temporary bridge until
 // the next real fetch overwrites station wholesale and re-establishes ground truth.
+// Tog mode (stopsInBoard) gets every departure's stop list inside the board response itself, and the fetch
+// worker's result buffer (xfrStation) keeps all of them until the NEXT fetch overwrites it - while
+// station only ever holds the stops of the primary and next departure. So whenever a train becomes
+// primary or next without having its stops (the one before it left, or several left together, or a
+// repeat was dropped), look them up there by identity - same journey id and scheduled time, not by
+// position, so no bookkeeping to drift - instead of leaving the board without stops until a refetch
+// that, once the monthly budget slows the refresh interval, can be minutes away. Not while a fetch is
+// running (the buffer is being rewritten) or has finished but isn't applied yet (it then describes a newer
+// list than station does). A train that splits (" og " in its destination) is left alone: the split point
+// only comes from the per-train lookup the next fetch does.
+static bool stopsFromBoardBuffer(int idx, char *calling, size_t callingSize) {
+  if (idx >= station.numServices) return false;
+  const rdService &svc = station.service[idx];
+  if (!svc.serviceID[0] || strstr(svc.destination," og ")) return false;
+  for (int k=0; k<xfrStation.numServices; k++) {
+    const rdiService &x = xfrStation.service[k];
+    if (x.calling[0] && strcmp(x.serviceID,svc.serviceID)==0 && strcmp(x.sTime,svc.sTime)==0) {
+      strlcpy(calling, x.calling, callingSize);
+      return true;
+    }
+  }
+  return false;
+}
+
+void restoreStopsFromBoardBuffer() {
+  if (boardMode != MODE_DKRAIL || fetchInProgress || fetchComplete) return;
+  if (!station.callingKnown && stopsFromBoardBuffer(0, station.calling, sizeof(station.calling))) station.callingKnown = true;
+  if (!station.nextCallingKnown && stopsFromBoardBuffer(1, station.nextCalling, sizeof(station.nextCalling))) station.nextCallingKnown = true;
+}
+
 void promoteNextService() {
   if (station.numServices > 1) {
     for (int i=0;i<station.numServices-1;i++) station.service[i] = station.service[i+1];
@@ -2651,6 +2681,8 @@ void updateRailDepartures() {
     station.nextOrigin[0] = '\0';
     station.nextSplitInfo[0] = '\0';
     station.nextCallingKnown = false;
+    // Tog mode keeps every departure's stops from the board response - see restoreStopsFromBoardBuffer().
+    restoreStopsFromBoardBuffer();
   }
   lastDataLoadTime = millis();
   noDataLoaded = false; noDataFailureStreak = 0;
@@ -3146,6 +3178,9 @@ void handleInfo(AsyncWebServerRequest *request) {
     multi_heap_info_t hi;
     heap_caps_get_info(&hi, MALLOC_CAP_8BIT);
     message+="\nHeap blocks: allocated " + String(hi.allocated_blocks) + " (" + String(hi.total_allocated_bytes) + " bytes), free " + String(hi.free_blocks);
+  }
+  if (station.numServices) {
+    message+="\nPrimary: " + String(station.service[0].via) + " -> " + String(station.service[0].destination) + " | calling-at " + (station.callingKnown ? "known" : "UNKNOWN") + ": " + String(station.calling);
   }
   if (emptyEventMillis) {
     message+="\nLast empty-board event: " + String((millis()-emptyEventMillis)/1000) + "s ago (loaded " + String(emptyEventLoaded) +
@@ -3766,6 +3801,7 @@ void departureBoardLoop() {
           station.callingKnown = false;
         }
       }
+      restoreStopsFromBoardBuffer();
       if (station.numServices) {
         if (!station.service[0].via[0]) isShowingVia = false;
         drawPrimaryService(isShowingVia);
@@ -4520,7 +4556,7 @@ void fetchDeparturesTask(void *pvParameters) {
       case FETCH_BOARD:
         switch (boardMode) {
           case MODE_DKRAIL:
-            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,dkProducts,true,dkCallingStopId,nrTimeOffset);
+            lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,dkProducts,true,dkCallingStopId,nrTimeOffset,false,false,true);   // true: stop lists come inside the board response (passlist) - see stopsInBoard
             nextDataUpdate = millis()+nextFetchDelay();
             break;
           case MODE_LETBANE:
