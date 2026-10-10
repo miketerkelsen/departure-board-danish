@@ -697,7 +697,6 @@ int rejseplanenClient::fetchDepartures(rdStation *station, stnMessages *messages
         xStation->service[i].platform[0] = '\0';
         xStation->service[i].opco[0] = '\0';
         xStation->service[i].calling[0] = '\0';
-        xStation->service[i].serviceMessage[0] = '\0';
         xStation->service[i].serviceID[0] = '\0';
         xStation->service[i].trainLength = 0;
         xStation->service[i].classesAvailable = 0;
@@ -1374,7 +1373,7 @@ void rejseplanenClient::loadDepartures(rdStation *station, stnMessages *messages
         strlcpy(station->calling, xStation->service[0].calling, sizeof(station->calling));
         strlcpy(station->origin, xStation->service[0].origin, sizeof(station->origin));
         strlcpy(station->splitInfo, pendingSplitInfo[0], sizeof(station->splitInfo));
-        strlcpy(station->serviceMessage, xStation->service[0].serviceMessage, sizeof(station->serviceMessage));
+        station->serviceMessage[0] = '\0';   // this API supplies no per-service message text
         station->callingKnown = callingFetchKnown;
     } else {
         station->callingKnown = false;

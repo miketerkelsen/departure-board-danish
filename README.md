@@ -11,6 +11,8 @@ This is an ESP32 based Departures Board for Danish public transport, using data 
   * **S-tog** - a dedicated S-tog board with line-letter badges (e.g. A, C, Bx) and minute countdowns, so you can run it alongside Tog for the same or a different station
   * **Letbane** - light rail, with the current location of the next service optionally shown
   * **Bus** - bus stop departures
+* Plus a Swedish mode, powered by [Trafiklab](https://www.trafiklab.se) (a separate, free API key):
+  * **Tunnelbana** - Stockholm's metro, with round line badges (10, 11, 13, 14, 17, 18, 19), half-minute countdowns and the stops each train calls at. All on-screen text is Swedish. Tick Denmark and/or Sweden in the web configuration to choose which countries' modes are offered, and switch the board between them.
 * Displays up to the next 9 departures with scheduled time, platform/track, destination, calling stations and expected/delayed departure time
 * Optionally only show services heading towards a particular calling-at station (Tog mode)
 * Scheduler and Carousel modes to automatically switch between any combination of configured stations/stops

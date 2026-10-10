@@ -44,6 +44,8 @@
 #include <responseCodes.h>
 #include <boardText.h>
 #include <rejseplanenClient.h>
+#include <trafiklabClient.h>
+#include <new>
 #include <githubClient.h>
 #include <rssClient.h>
 #include <touchSensor.h>
@@ -340,6 +342,24 @@ stnMessages messages;
 
 // Data transfer clients
 rejseplanenClient rejseplanenData(&xfrStation,&xfrMessages,&jsonKeyBuffer);
+// Swedish boards (Trafiklab). Created on the heap the first time a Swedish mode is used rather than as a global:
+// static RAM on this board is so tight that even this small client's buffers (~1.2KB) overflowed the linker's
+// DRAM segment, and a board that never uses a Swedish mode shouldn't pay for it at all. It shares the fetch
+// result buffers above - only one mode fetches at a time. Created from loadSlot() (Core 1) when a Swedish
+// location is loaded, or by the web picker; the publish is race-safe either way.
+static trafiklabClient *trafiklabPtr = nullptr;
+static trafiklabClient* tl() {
+  static portMUX_TYPE tlMux = portMUX_INITIALIZER_UNLOCKED;
+  if (trafiklabPtr) return trafiklabPtr;
+  trafiklabClient *fresh = new (std::nothrow) trafiklabClient(&xfrStation,&xfrMessages,&jsonKeyBuffer);
+  if (!fresh) return nullptr;
+  bool lost = false;
+  portENTER_CRITICAL(&tlMux);
+  if (trafiklabPtr) lost = true; else trafiklabPtr = fresh;
+  portEXIT_CRITICAL(&tlMux);
+  if (lost) delete fresh;
+  return trafiklabPtr;
+}
 weatherClient currentWeather(&jsonKeyBuffer);
 rssClient rss(&jsonKeyBuffer);
 github ghUpdate(&jsonKeyBuffer);
@@ -469,6 +489,8 @@ static bool letbaneIsSet = false;
 static bool dkBusIsSet = false;
 static bool stogIsSet = false;
 static bool metroIsSet = false;
+static bool seMetroIsSet = false;          // Stockholm tunnelbana (Trafiklab) location configured
+static uint16_t activeModesMask = 0xFFFF;  // config "activeModes": bit n set = board mode n takes part in the touch/button mode rotation
 static bool schedulerActive = false;
 static bool carouselActive = false;
 static int activeSlotEventTime;
@@ -477,6 +499,7 @@ static int nextSlotEventTime;
 static char callingStation[45] = "";       // Calling filter station friendly name
 static int busDestX;                       // Variable margin for bus destination
 
+static char trafiklabKey[41] = "";          // Trafiklab Realtime APIs key (Swedish modes)
 static char rejseplanenKey[37] = "";        // Rejseplanen API 2.0 accessId
 static char dkCallingStopId[8] = "";        // Rejseplanen stop id to filter DK Rail routes on (direction=)
 static int dkProducts = 31;                 // Rejseplanen DK Rail product bitmask (IC+ICL+Re+Togbus+S-tog by default)
@@ -489,9 +512,15 @@ enum boardModes {
   MODE_LETBANE = 4,
   MODE_DKBUS = 5,
   MODE_STOG = 6,
-  MODE_METRO = 7
+  MODE_METRO = 7,
+  MODE_SE_METRO = 8
 };
 boardModes boardMode = MODE_DKRAIL;
+
+// The Copenhagen Metro board and the Stockholm tunnelbana board share the round line badge and the half-minute
+// countdown; the Swedish board additionally uses Swedish text throughout.
+static inline bool isMetroBoard() { return boardMode==MODE_METRO || boardMode==MODE_SE_METRO; }
+static inline bool isSwedishBoard() { return boardMode==MODE_SE_METRO; }
 
 // Animation
 #define frameTimeRail 25
@@ -1236,11 +1265,19 @@ void showNoDataScreen() {
     case MODE_METRO:
       sprintf(msg,"Ingen data tilg\xE6ngelig for stop-id \"%s\".",locationCode);
       break;
+    case MODE_SE_METRO:
+      sprintf(msg,"Inga data tillg\xE4ngliga f\xF6r h\xE5llplats-id \"%s\".",locationCode);
+      break;
   }
   centreMixedText(msg,-1,u8g2_font_6x13_tf);
   u8g2.setFont(NatRailSmall9);
-  centreText("Tjek at du har valgt en gyldig lokation",14);
-  centreMixedText("G\xE5 til URL'en nedenfor for at v\xE6lge en lokation...",26,u8g2_font_6x10_tf);
+  if (isSwedishBoard()) {
+    centreMixedText("Kontrollera att du valt en giltig plats",14,u8g2_font_6x10_tf);
+    centreMixedText("G\xE5 till adressen nedan f\xF6r att v\xE4lja plats...",26,u8g2_font_6x10_tf);
+  } else {
+    centreText("Tjek at du har valgt en gyldig lokation",14);
+    centreMixedText("G\xE5 til URL'en nedenfor for at v\xE6lge en lokation...",26,u8g2_font_6x10_tf);
+  }
   centreText(myUrl,40);
   u8g2.sendBuffer();
 }
@@ -1283,10 +1320,17 @@ void showTokenErrorScreen() {
   noServiceClockIsActive = false;
   u8g2.clearBuffer();
   u8g2.setFont(NatRailTall12);
-  centreMixedText("Adgang til Rejseplanen-databasen n\xE6gtet.",-1,u8g2_font_6x13_tf);
-  u8g2.setFont(NatRailSmall9);
-  centreMixedText("Du skal indtaste en gyldig API-n\xF8gle,",14,u8g2_font_6x10_tf);
-  centreText("tjek at du har indtastet den korrekt nedenfor:",26);
+  if (isSwedishBoard()) {
+    centreMixedText("\xC5tkomst till Trafiklab nekad.",-1,u8g2_font_6x13_tf);
+    u8g2.setFont(NatRailSmall9);
+    centreMixedText("Du m\xE5ste ange en giltig API-nyckel,",14,u8g2_font_6x10_tf);
+    centreMixedText("kontrollera att du skrivit den r\xE4tt nedan:",26,u8g2_font_6x10_tf);
+  } else {
+    centreMixedText("Adgang til Rejseplanen-databasen n\xE6gtet.",-1,u8g2_font_6x13_tf);
+    u8g2.setFont(NatRailSmall9);
+    centreMixedText("Du skal indtaste en gyldig API-n\xF8gle,",14,u8g2_font_6x10_tf);
+    centreText("tjek at du har indtastet den korrekt nedenfor:",26);
+  }
   sprintf(msg,"%s/keys.htm",myUrl);
   centreText(msg,40);
   u8g2.sendBuffer();
@@ -1481,6 +1525,9 @@ void loadApiKeys() {
         if (settings["rejseplanenKey"].is<const char*>()) {
           strlcpy(rejseplanenKey,settings["rejseplanenKey"],sizeof(rejseplanenKey));
         }
+        if (settings["trafiklabKey"].is<const char*>()) {
+          strlcpy(trafiklabKey,settings["trafiklabKey"],sizeof(trafiklabKey));
+        }
         apiKeys = true;
 
       } else {
@@ -1498,6 +1545,20 @@ void resetLocationIds() {
   dkBusIsSet = false;
   stogIsSet = false;
   metroIsSet = false;
+  seMetroIsSet = false;
+}
+
+// A mode is in the rotation when it has a location AND the user has it ticked as active (the web config's
+// "activeModes"; a board saved before that existed has every bit set, so every configured mode counts as before).
+static bool modeEnabled(int mode) {
+  bool isSet = (mode==MODE_DKRAIL && dkRailIsSet) || (mode==MODE_STOG && stogIsSet) || (mode==MODE_LETBANE && letbaneIsSet) ||
+               (mode==MODE_DKBUS && dkBusIsSet) || (mode==MODE_METRO && metroIsSet) || (mode==MODE_SE_METRO && seMetroIsSet);
+  return isSet && (activeModesMask & (1u << mode));
+}
+
+static bool otherModeEnabled() {
+  for (int m=MODE_DKRAIL; m<=MODE_SE_METRO; m++) if (m != (int)boardMode && modeEnabled(m)) return true;
+  return false;
 }
 
 void saveFirmwareInfo() {
@@ -1530,38 +1591,15 @@ int getTimeInMinutes() {
 
 void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
   if (requestedMode == MODE_NEXTMODE) {
-    // Circular order: DKRAIL (Tog) -> STOG (S-tog) -> LETBANE (Letbane) -> DKBUS (Bus) -> METRO -> (back to Tog)
-    switch (boardMode) {
-      case MODE_DKRAIL:
-        if (stogIsSet) boardMode = MODE_STOG;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (metroIsSet) boardMode = MODE_METRO;
-        break;
-      case MODE_STOG:
-        if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (metroIsSet) boardMode = MODE_METRO;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        break;
-      case MODE_LETBANE:
-        if (dkBusIsSet) boardMode = MODE_DKBUS;
-        else if (metroIsSet) boardMode = MODE_METRO;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        break;
-      case MODE_DKBUS:
-        if (metroIsSet) boardMode = MODE_METRO;
-        else if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        break;
-      case MODE_METRO:
-        if (dkRailIsSet) boardMode = MODE_DKRAIL;
-        else if (stogIsSet) boardMode = MODE_STOG;
-        else if (letbaneIsSet) boardMode = MODE_LETBANE;
-        else if (dkBusIsSet) boardMode = MODE_DKBUS;
-        break;
+    // Circular order: DKRAIL (Tog) -> STOG (S-tog) -> LETBANE (Letbane) -> DKBUS (Bus) -> METRO -> SE_METRO
+    // (Stockholm tunnelbana) -> (back to Tog). Only configured modes are visited; with none other configured it stays put.
+    static const boardModes order[] = { MODE_DKRAIL, MODE_STOG, MODE_LETBANE, MODE_DKBUS, MODE_METRO, MODE_SE_METRO };
+    const int n = sizeof(order)/sizeof(order[0]);
+    int cur = 0;
+    for (int i=0;i<n;i++) if (order[i]==boardMode) cur = i;
+    for (int step=1; step<n; step++) {
+      boardModes cand = order[(cur+step)%n];
+      if (modeEnabled(cand)) { boardMode = cand; break; }
     }
   } else {
     if (slot["mode"].is<int>()) boardMode = slot["mode"];
@@ -1650,6 +1688,22 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
       convertDanishToLatin1(locationName, sizeof(locationName));
       break;
 
+    case MODE_SE_METRO:
+      // Stockholm tunnelbana (Trafiklab) - its own location slot, so it can sit alongside any Danish mode.
+      tl();   // create the client now, on this core, before the fetch task first wants it
+      if (slot["seMetroId"].is<const char*>())  strlcpy(locationCode, slot["seMetroId"], sizeof(locationCode));
+      if (isDefault) {
+        if (slot["seMetroName"].is<const char*>()) strlcpy(locationName, slot["seMetroName"], sizeof(locationName));
+        if (slot["seMetroLat"].is<float>())         locationLat = slot["seMetroLat"];
+        if (slot["seMetroLon"].is<float>())         locationLon = slot["seMetroLon"];
+      } else {
+        if (slot["name"].is<const char*>()) strlcpy(locationName, slot["name"], sizeof(locationName));
+        if (slot["lat"].is<float>())          locationLat = slot["lat"];
+        if (slot["lon"].is<float>())          locationLon = slot["lon"];
+      }
+      convertDanishToLatin1(locationName, sizeof(locationName));
+      break;
+
   }
 }
 
@@ -1684,6 +1738,18 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
         if (settings["dkBusId"].is<const char*>() && strlen(settings["dkBusId"])) dkBusIsSet = true; else dkBusIsSet = false;
         if (settings["stogId"].is<const char*>() && strlen(settings["stogId"])) stogIsSet = true; else stogIsSet = false;
         if (settings["metroId"].is<const char*>() && strlen(settings["metroId"])) metroIsSet = true; else metroIsSet = false;
+        if (settings["seMetroId"].is<const char*>() && strlen(settings["seMetroId"])) seMetroIsSet = true; else seMetroIsSet = false;
+        // Which modes are ticked active in the web config. Absent (an older config) or empty = no restriction.
+        activeModesMask = 0xFFFF;
+        JsonArray activeModes = settings["activeModes"].as<JsonArray>();
+        if (!activeModes.isNull() && activeModes.size() > 0) {
+          uint16_t mask = 0;
+          for (JsonVariant v : activeModes) {
+            int m = v.as<int>();
+            if (m >= 0 && m < 16) mask |= (uint16_t)(1u << m);
+          }
+          if (mask) activeModesMask = mask;
+        }
 
         if (settings["hostname"].is<const char*>())   strlcpy(hostname, settings["hostname"], sizeof(hostname));
         if (settings["showDate"].is<bool>())          dateEnabled = settings["showDate"];
@@ -1941,7 +2007,7 @@ void softResetBoard(boardModes requestedMode) {
 
   if (rssEnabled && prevRssUrl != rssURL) {
     rssMessage[0] = '\0';
-    if (boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_STOG || boardMode == MODE_METRO) {
+    if (boardMode == MODE_DKRAIL || boardMode == MODE_LETBANE || boardMode == MODE_STOG || boardMode == MODE_METRO || boardMode == MODE_SE_METRO) {
       prevProgressBarPosition = 95;
       progressBar("Opdaterer RSS-nyheder",50);
       updateRssFeed();
@@ -1975,6 +2041,11 @@ void softResetBoard(boardModes requestedMode) {
       checkWeatherUpdate(prevLat,prevLon);
       progressBar("Initialiserer Metro",70);
       break;
+
+    case MODE_SE_METRO:
+      checkWeatherUpdate(prevLat,prevLon);
+      progressBar("Initierar Tunnelbana",70);
+      break;
   }
   station.numServices=0;
   messages.numMessages=0;
@@ -1995,7 +2066,7 @@ void switchToNextMode() {
     softResetBoard(MODE_LOADCONFIG);
   }
   else if (schedulerActive) softResetBoard(MODE_NEXTSCHEDULE);
-  else if (dkRailIsSet+letbaneIsSet+dkBusIsSet+stogIsSet+metroIsSet > 1) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
+  else if (otherModeEnabled()) softResetBoard(MODE_NEXTMODE); // Check there's at least two configured modes
 }
 
 // WiFiManager callback, entered config mode
@@ -2158,6 +2229,18 @@ void restoreStopsFromBoardBuffer() {
   if (!station.nextCallingKnown && stopsFromBoardBuffer(1, station.nextCalling, sizeof(station.nextCalling))) station.nextCallingKnown = true;
 }
 
+// Line + direction -> stops lookup for the primary departure after a promotion: a pure local cache read, no fetch.
+// S-tog and the Copenhagen Metro use the Rejseplanen client's cache; the Stockholm tunnelbana has its own.
+static bool lookupLineDirCalling() {
+  if (boardMode == MODE_SE_METRO) {
+    station.origin[0] = '\0';
+    trafiklabClient *c = tl();
+    return c && c->lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling));
+  }
+  return (boardMode == MODE_STOG || boardMode == MODE_METRO) &&
+         rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin));
+}
+
 void promoteNextService() {
   if (station.numServices > 1) {
     for (int i=0;i<station.numServices-1;i++) station.service[i] = station.service[i+1];
@@ -2188,7 +2271,7 @@ bool useSTogStyle(int idx) {
 // fetchDeparturesTask() - so unlike S-tog there's no mixed-board/per-service case to check).
 bool useMetroStyle(int idx) {
   if (idx>=station.numServices) return false;
-  return boardMode==MODE_METRO;
+  return isMetroBoard();
 }
 
 // Rejseplanen has no seconds-resolution "time to arrival" field (unlike TfL), so approximate a
@@ -2367,6 +2450,16 @@ int drawMetroBadge(int x, int y, int size, const char *letter, const uint8_t *fo
 }
 
 // Draw the primary service line
+// The Swedish board puts å/ä/ö in the countdown/platform text (and "Inställd"), which the hand-built rail fonts
+// don't have - those go through the mixed drawer that borrows the glyphs from a Latin-1 font. Every other mode
+// keeps its plain, faster path exactly as before.
+static int boardTextWidth(const char *text, const uint8_t *accentFont) {
+  return isSwedishBoard() ? getMixedStringWidth(text,accentFont) : getStringWidth(text);
+}
+static void boardDrawText(int x, int y, const char *text, const uint8_t *accentFont) {
+  if (isSwedishBoard()) drawMixedStr(x,y,text,accentFont); else u8g2.drawStr(x,y,text);
+}
+
 void drawPrimaryService(bool showVia) {
   int destPos;
   char clipDestination[MAXLOCATIONSIZE+5];
@@ -2397,14 +2490,14 @@ void drawPrimaryService(bool showVia) {
     else sTogCountdownText(station.service[0],etd,sizeof(etd));
   } else if (isDigit(station.service[0].etd[0])) sprintf(etd,"Forventet %s",station.service[0].etd);
   else strcpy(etd,station.service[0].etd);
-  int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
-  u8g2.drawStr(SCREEN_WIDTH - etdWidth,LINE1-1,etd);
+  int etdWidth = boardTextWidth(etd,u8g2_font_6x13_tf) + (etd[strlen(etd)-1]=='1'?1:0);
+  boardDrawText(SCREEN_WIDTH - etdWidth,LINE1-1,etd,u8g2_font_6x13_tf);
   int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
   if (station.platformAvailable && station.service[0].platform[0] && station.service[0].serviceType == TRAIN && !hidePlatform) {
-    sprintf(plat,"Spor %.7s",station.service[0].platform);
-    int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);;
-    u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,LINE1-1,plat);
+    sprintf(plat,isSwedishBoard()?"Sp\xE5r %.7s":"Spor %.7s",station.service[0].platform);
+    int platWidth = boardTextWidth(plat,u8g2_font_6x13_tf) + (plat[strlen(plat)-1]=='1'?1:0);;
+    boardDrawText(SCREEN_WIDTH - etdWidth - platWidth - 7,LINE1-1,plat,u8g2_font_6x13_tf);
     spaceAvailable-=(platWidth+7);
   }
 
@@ -2476,14 +2569,14 @@ void drawServiceLine(int line, int y) {
       else sTogCountdownText(station.service[line],etd,sizeof(etd));
     } else if (isDigit(station.service[line].etd[0])) sprintf(etd,"Forventet %s",station.service[line].etd);
     else strcpy(etd,station.service[line].etd);
-    int etdWidth = getStringWidth(etd) + (etd[strlen(etd)-1]=='1'?1:0);
-    u8g2.drawStr(SCREEN_WIDTH - etdWidth,y-1,etd);
+    int etdWidth = boardTextWidth(etd,u8g2_font_6x10_tf) + (etd[strlen(etd)-1]=='1'?1:0);
+    boardDrawText(SCREEN_WIDTH - etdWidth,y-1,etd,u8g2_font_6x10_tf);
     int spaceAvailable = SCREEN_WIDTH - destPos - etdWidth - 6;
 
     if (station.platformAvailable && !hidePlatform && station.service[line].platform[0] && station.service[line].serviceType == TRAIN) {
-      sprintf(plat,"Spor %.7s",station.service[line].platform);
-      int platWidth = getStringWidth(plat) + (plat[strlen(plat)-1]=='1'?1:0);
-      u8g2.drawStr(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat);
+      sprintf(plat,isSwedishBoard()?"Sp\xE5r %.7s":"Spor %.7s",station.service[line].platform);
+      int platWidth = boardTextWidth(plat,u8g2_font_6x10_tf) + (plat[strlen(plat)-1]=='1'?1:0);
+      boardDrawText(SCREEN_WIDTH - etdWidth - platWidth - 7,y-1,plat,u8g2_font_6x10_tf);
       spaceAvailable-=(platWidth+7);
     }
     strcpy(clipDestination,station.service[line].destination);
@@ -2495,6 +2588,9 @@ void drawServiceLine(int line, int y) {
     if (weatherMsg[0] && line==station.numServices) {
       // We're showing the weather
       centreText(weatherMsg,y-1);
+    } else if (isSwedishBoard() && line==station.numServices+(weatherMsg[0]?1:0)) {
+      // Trafiklab's licence (CC BY 4.0) asks for attribution wherever its data is shown.
+      centreMixedText("Data fr\xE5n Trafiklab.se",y-1,u8g2_font_6x10_tf);
     }
     // No attribution shown here - Rejseplanen has no attribution requirement, and this board is
     // Danish-only (see MODE_DKRAIL/MODE_STOG/MODE_METRO, the only modes that ever draw this row).
@@ -2503,7 +2599,7 @@ void drawServiceLine(int line, int y) {
 
 // Is this scrolling message line the "Stopper ved" (calling points) message?
 bool isCallingMessage(const char* msg) {
-  return strncmp("Stopper",msg,7)==0;
+  return strncmp("Stopper",msg,7)==0 || strncmp("Stannar",msg,7)==0;
 }
 
 // Forward declaration - defined further down, needed here for the "originates here" message below.
@@ -2534,7 +2630,8 @@ void buildServiceMessages() {
     if (station.serviceMessage[0]) {
       strcpy(line2[0],station.serviceMessage);
     } else {
-      strcpy(line2[0],"Denne afgang er aflyst. Se sk\xE6rmene for yderligere info.");
+      if (isSwedishBoard()) strcpy(line2[0],"Denna avg\xE5ng \xE4r inst\xE4lld. Se informationsskyltarna f\xF6r mer information.");
+      else strcpy(line2[0],"Denne afgang er aflyst. Se sk\xE6rmene for yderligere info.");
     }
     numMessages=1;
   } else {
@@ -2546,7 +2643,7 @@ void buildServiceMessages() {
     }
     if (station.calling[0]) {
       // Add the calling stops message
-      sprintf(line2[numMessages],"Stopper ved: %s",station.calling);
+      sprintf(line2[numMessages],isSwedishBoard()?"Stannar vid: %s":"Stopper ved: %s",station.calling);
       numMessages++;
     }
     if (station.splitInfo[0]) {
@@ -2605,7 +2702,8 @@ void drawStationBoard() {
     } else {
       blankArea(0,LINE2,256,LINE4-LINE2);
       setTallFont();
-      centreText("Der er ingen planlagte afgange fra denne station.",LINE1-1);
+      if (isSwedishBoard()) centreMixedText("Det finns inga planerade avg\xE5ngar fr\xE5n denna station.",LINE1-1,u8g2_font_6x13_tf);
+      else centreText("Der er ingen planlagte afgange fra denne station.",LINE1-1);
     }
   } else {
     msgLine = LINE4;
@@ -2647,7 +2745,8 @@ void drawStationBoard() {
 }
 
 void updateRailDepartures() {
-  rejseplanenData.loadDepartures(&station,&messages);
+  if (boardMode == MODE_SE_METRO) { if (trafiklabClient *c = tl()) c->loadDepartures(&station,&messages); }
+  else rejseplanenData.loadDepartures(&station,&messages);
   emptyEventLoaded = station.numServices;
   // Rejseplanen doesn't always retire a service from its own departureBoard response as promptly as
   // a normal train clears in real life - a cancelled one in particular can keep being returned well
@@ -3192,6 +3291,7 @@ void handleInfo(AsyncWebServerRequest *request) {
     message+="\nAPI usage this month: " + String(apiUsageThisMonth) + " / " + String(apiMonthlyBudget) +
       " (current fetch interval: " + String((int)(effectiveMs/1000)) + "s)";
   }
+  if (boardMode == MODE_SE_METRO && trafiklabPtr) message+="\nTrafiklab requests since boot: " + String(trafiklabPtr->getApiRequestCount());
   message+="\nLast Result: ";
   message+=String(jsonKeyBuffer.lastResultMessage);
   message+="\nUpdate result code: ";
@@ -3395,6 +3495,26 @@ void handleDkStationPicker(AsyncWebServerRequest *request) {
   request->send(200,"application/json",result);
 }
 
+// Same idea for the Swedish boards: Trafiklab's stop-name search, narrowed to stops with tunnelbana.
+void handleSeStationPicker(AsyncWebServerRequest *request) {
+  if (!request->hasParam("q")) {
+    sendResponse(400,"Missing Query",request);
+    return;
+  }
+  String query = request->getParam("q")->value();
+  if (query.length() <= 1) {
+    sendResponse(400,"Query too short",request);
+    return;
+  }
+  if (!trafiklabKey[0]) {
+    sendResponse(400,"No Trafiklab API key configured",request);
+    return;
+  }
+  trafiklabClient *c = tl();
+  String result = c ? c->searchStops(query.c_str(), trafiklabKey, "METRO", 8) : String("[]");
+  request->send(200,"application/json",result);
+}
+
 /*
  * Setup / Loop functions
 */
@@ -3445,7 +3565,7 @@ void departureBoardLoop() {
         for (int i=0;i<numMessages;i++) {
           if (isCallingMessage(line2[i])) {
             // refresh the calling at times
-            sprintf(line2[i],"Stopper ved: %s",station.calling);
+            sprintf(line2[i],isSwedishBoard()?"Stannar vid: %s":"Stopper ved: %s",station.calling);
             break;
           }
         }
@@ -3739,7 +3859,7 @@ void departureBoardLoop() {
       // happens. Checked first, before the older pre-fetch consumption below, since it doesn't
       // depend on timing (pre-fetch only helps if it happened to land before THIS promotion; the
       // cache helps as soon as this line+direction has EVER been seen, on any earlier departure).
-      if ((boardMode == MODE_STOG || boardMode == MODE_METRO) && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+      if (lookupLineDirCalling()) {
         station.callingKnown = true;
         // S-tog services never split (fixed suburban lines) - the cache only
         // ever holds calling/origin, never splitInfo, so explicitly clear it here rather than risk
@@ -3791,7 +3911,7 @@ void departureBoardLoop() {
         // the line+direction cache first (same reasoning as the single-promotion case above) before
         // falling back to blank - a back-to-back cluster is exactly the case with no pre-fetch
         // coverage at all beyond position [1], so the cache matters most right here.
-        if ((boardMode == MODE_STOG || boardMode == MODE_METRO) && rejseplanenData.lookupCachedCalling(station.service[0].via, station.service[0].destination, station.calling, sizeof(station.calling), station.origin, sizeof(station.origin))) {
+        if (lookupLineDirCalling()) {
           station.callingKnown = true;
           station.splitInfo[0] = '\0';  // S-tog never splits - see the single-promotion case above
         } else {
@@ -3819,7 +3939,8 @@ void departureBoardLoop() {
         // flight). Leaving the cleared row blank looked exactly like "no data" - say what's actually
         // happening instead. The next successful drawStationBoard() clears this away again.
         setTallFont();
-        centreText("Opdaterer afgange...",LINE1-1);
+        if (isSwedishBoard()) centreMixedText("Uppdaterar avg\xE5ngar...",LINE1-1,u8g2_font_6x13_tf);
+        else centreText("Opdaterer afgange...",LINE1-1);
         setSmallFont();
         u8g2.updateDisplayArea(0,1,32,3);
       }
@@ -3848,7 +3969,7 @@ void departureBoardLoop() {
       // until a fetch lands, and Metro in particular only ever publishes about four minutes of
       // upcoming departures, so one missed fetch is enough to get here. Bounded - a refetch that
       // fails goes through nextFetchDelay()'s capped fast-retry like any other empty-board failure.
-      if ((!station.callingKnown && boardMode != MODE_METRO) || !station.numServices) requestEarlyFetch();
+      if ((!station.callingKnown && !isMetroBoard()) || !station.numServices) requestEarlyFetch();
       // Also discard whatever's completed (or still in flight and about to complete) from before -
       // the trigger-time discard above only catches a fetch that was ALREADY sitting done-but-
       // unconsumed when the animation started; one that was still in flight at that point can finish
@@ -4540,6 +4661,9 @@ unsigned long nextFetchDelay() {
   // Access denied: retry, but slowly. If the key really is invalid every retry fails identically, so
   // keep them cheap (144 a day); if it was a transient rejection, the board is back within minutes.
   if (lastUpdateResult == UPD_UNAUTHORISED) return 600000UL;
+  // Trafiklab: its own, much larger quota (100,000 a month on the free tier) and the Danish budget pacer does not
+  // apply. Its answers are cached server-side for 60 seconds, so asking more often than that gains nothing.
+  if (boardMode == MODE_SE_METRO) return apiRefreshRate < 60000 ? 60000UL : (unsigned long)apiRefreshRate;
   unsigned long pacedMs = computePacedIntervalMs();
   return pacedMs > (unsigned long)apiRefreshRate ? pacedMs : (unsigned long)apiRefreshRate;
 }
@@ -4589,6 +4713,13 @@ void fetchDeparturesTask(void *pvParameters) {
             // anything that isn't actually a Metro service, as a guard against a stop id shared with
             // other products.
             lastUpdateResult = rejseplanenData.fetchDepartures(&station,&messages,locationCode,rejseplanenKey,DKRAIL_LETBANE_MAX_SERVICES,METRO_PRODUCTS,true,"",nrTimeOffset,true,true);
+            nextDataUpdate = millis()+nextFetchDelay();
+            break;
+          case MODE_SE_METRO:
+            // Stockholm tunnelbana via Trafiklab: tunnelbana departures only, plus the stops after this station
+            // for the first two (looked up per trip, then cached per line+direction - see trafiklabClient.h).
+            { trafiklabClient *c = tl();
+              lastUpdateResult = c ? c->fetchDepartures(&station,&messages,locationCode,trafiklabKey,DKRAIL_LETBANE_MAX_SERVICES,true,true) : UPD_NO_RESPONSE; }
             nextDataUpdate = millis()+nextFetchDelay();
             break;
         }
@@ -4693,6 +4824,7 @@ void setup(void) {
   server.on("/reboot", HTTP_GET, [](AsyncWebServerRequest *request){handleReboot(request);});
   server.on("/stationpicker", HTTP_GET, [](AsyncWebServerRequest *request){handleStationPicker(request);});
   server.on("/dkstationpicker", HTTP_GET, [](AsyncWebServerRequest *request){handleDkStationPicker(request);});
+  server.on("/sestationpicker", HTTP_GET, [](AsyncWebServerRequest *request){handleSeStationPicker(request);});
   server.on("/firmware", HTTP_GET, [](AsyncWebServerRequest *request){handleFirmwareInfo(request);});
   server.on("/brightness", HTTP_GET, [](AsyncWebServerRequest *request){handleBrightness(request);});
   server.on("/ota", HTTP_GET, [](AsyncWebServerRequest *request){handleOtaUpdate(request);});
@@ -4710,7 +4842,7 @@ void setup(void) {
       delete body; // Clean up memory
       request->_tempObject = nullptr;
 
-      if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet) || request->hasParam("reboot")) {
+      if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet && !seMetroIsSet) || request->hasParam("reboot")) {
         // First time setup or base config change, we need a full reboot
         sendResponse(200,"Configuration saved. The Departures Board will now restart.",request);
         restartTimer.once(1, []() { ESP.restart(); });
@@ -4761,7 +4893,7 @@ void setup(void) {
         // Load/Update the API Keys in memory
         loadApiKeys();
         // If all location codes are blank we're in the setup process. If not, the keys have been changed so just reboot.
-        if (!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet) {
+        if (!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet && !seMetroIsSet) {
           sendResponse(200,msg,request);
           writeDefaultConfig();
           showSetupCrsHelpScreen();
@@ -4890,7 +5022,7 @@ void setup(void) {
   }
   checkPostWebUpgrade();
   // First time configuration?
-  if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet) || !rejseplanenKey[0]) {
+  if ((!dkRailIsSet && !letbaneIsSet && !dkBusIsSet && !stogIsSet && !metroIsSet && !seMetroIsSet) || (!rejseplanenKey[0] && !trafiklabKey[0])) {
     if (!apiKeys) showSetupKeysHelpScreen();
     else showSetupCrsHelpScreen();
     // First time setup mode will exit with a reboot, so just loop here forever
@@ -4966,6 +5098,9 @@ void setup(void) {
       startupProgressPercent=70;
   } else if (boardMode == MODE_METRO) {
       progressBar("Initialiserer Metro",70);
+      startupProgressPercent=70;
+  } else if (boardMode == MODE_SE_METRO) {
+      progressBar("Initierar Tunnelbana",70);
       startupProgressPercent=70;
   }
 }
@@ -5073,6 +5208,10 @@ void loop(void) {
       break;
 
     case MODE_METRO:
+      departureBoardLoop();
+      break;
+
+    case MODE_SE_METRO:
       departureBoardLoop();
       break;
   }

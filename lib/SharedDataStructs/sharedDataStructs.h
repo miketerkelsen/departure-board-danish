@@ -135,7 +135,9 @@ struct rdService {
     byte classesAvailable;
     char opco[50];
     char calling[MAXCALLINGSIZE];
-    char serviceMessage[MAXMESSAGESIZE];
+    // (No per-service serviceMessage here any more: nothing ever wrote one - the fetch clients only cleared it
+    // and loadDepartures() copied the always-empty result - and at MAXMESSAGESIZE x MAXBOARDSERVICES it cost
+    // 9.6KB of the board's very tight static RAM. rdStation::serviceMessage, which the display reads, stays.)
     char stopArea[40];  // see rdService.stopArea
     int serviceType;
     char serviceID[MAXJOURNEYREFSIZE];  // LDBWS service id (UK) or JourneyDetailRef.ref token (Rejseplanen)

@@ -39,6 +39,16 @@
   .custom-tabs .tab-content {padding:8px;background-color:var(--bs-secondary-bg);border-radius:0 15px 15px;}
   .custom-tabs .form-range::-webkit-slider-runnable-track {background-color:var(--bs-gray-500);}
   .custom-tabs .form-range::-moz-range-track {background-color:var(--bs-gray-500);}
+  .flag {display:inline-block;width:22px;height:16px;vertical-align:-3px;margin-right:2px;background-size:cover;background-position:center;border-radius:2px;box-shadow:0 0 0 1px rgba(128,128,128,0.35);}
+  .fdk {background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 37 28'%3E%3Crect width='37' height='28' fill='%23C8102E'/%3E%3Crect x='12' width='4' height='28' fill='%23fff'/%3E%3Crect y='12' width='37' height='4' fill='%23fff'/%3E%3C/svg%3E");}
+  .fse {background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 10'%3E%3Crect width='16' height='10' fill='%23006AA7'/%3E%3Crect x='5' width='2' height='10' fill='%23FECC00'/%3E%3Crect y='4' width='16' height='2' fill='%23FECC00'/%3E%3C/svg%3E");}
+  .mode-row {display:flex;flex-wrap:wrap;gap:6px;}
+  .mode-item {display:flex;align-items:center;gap:6px;flex:1 1 130px;}
+  .mode-item .btn {flex:1;}
+  .mode-item.inactive .btn {opacity:.45;}
+  .mode-active {margin-top:0;flex-shrink:0;width:1.2em;height:1.2em;cursor:pointer;}
+  .country-head {display:none;}
+  #modeSelector.multi .country-head {display:block;}
   @media (hover: none) {  /* iOS sticky hover fix */
     #scheduleTab .btn-outline-secondary:hover {background-color:transparent!important;color:var(--bs-btn-color)!important;border-color:var(--bs-btn-border-color)!important;}
     #scheduleTab .btn-danger:hover {background-color:var(--bs-btn-bg)!important;border-color:var(--bs-btn-border-color)!important;}
@@ -61,19 +71,63 @@
           </div>
         </legend>
 
+        <div class="mb-3" id="countrySelector">
+          <label class="form-label">Countries</label>
+          <div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="checkbox" id="countryDk" checked>
+              <label class="form-check-label" for="countryDk"><span class="flag fdk"></span> Denmark</label>
+            </div>
+            <div class="form-check form-check-inline">
+              <input class="form-check-input" type="checkbox" id="countrySe">
+              <label class="form-check-label" for="countrySe"><span class="flag fse"></span> Sweden</label>
+            </div>
+          </div>
+          <div class="form-text">Tick every country you want modes for. With both ticked you can switch the board between, for example, a Danish and a Swedish metro.</div>
+        </div>
+
         <div class="mb-3" id="modeSelector">
           <label class="form-label">Board Mode</label>
-          <div class="btn-group w-100" role="group">
-            <input type="radio" class="btn-check" name="boardmode" id="modeDkRail" value="3" autocomplete="off">
-            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkRail"><img src="/irail.webp" class="me-2" alt=""> Tog</label>
-            <input type="radio" class="btn-check" name="boardmode" id="modeStog" value="6" autocomplete="off">
-            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeStog"><img src="/irail.webp" class="me-2" alt=""> S-tog</label>
-            <input type="radio" class="btn-check" name="boardmode" id="modeLetbane" value="4" autocomplete="off">
-            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeLetbane"><img src="/itube.webp" class="me-2" alt=""> Letbane</label>
-            <input type="radio" class="btn-check" name="boardmode" id="modeDkBus" value="5" autocomplete="off">
-            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkBus"><img src="/ibus.webp" class="me-2" alt=""> Bus</label>
-            <input type="radio" class="btn-check" name="boardmode" id="modeMetro" value="7" autocomplete="off">
-            <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeMetro"><img src="/itube.webp" class="me-2" alt=""> Metro</label>
+          <div class="form-text mt-0 mb-2">Tick the modes you want active - the touch sensor/button only switches between the ticked ones. Click a mode's name to set it up or show it.</div>
+          <div id="modesDk">
+            <div class="small text-body-secondary mb-1 country-head"><span class="flag fdk"></span> Denmark</div>
+            <div class="mode-row">
+              <div class="mode-item" id="item3">
+                <input class="form-check-input mode-active" type="checkbox" id="activeMode3" data-mode="3" title="Active - included when the touch sensor/button switches mode">
+                <input type="radio" class="btn-check" name="boardmode" id="modeDkRail" value="3" autocomplete="off">
+                <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkRail"><img src="/irail.webp" class="me-2" alt=""> Tog</label>
+              </div>
+              <div class="mode-item" id="item6">
+                <input class="form-check-input mode-active" type="checkbox" id="activeMode6" data-mode="6" title="Active - included when the touch sensor/button switches mode">
+                <input type="radio" class="btn-check" name="boardmode" id="modeStog" value="6" autocomplete="off">
+                <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeStog"><img src="/irail.webp" class="me-2" alt=""> S-tog</label>
+              </div>
+              <div class="mode-item" id="item4">
+                <input class="form-check-input mode-active" type="checkbox" id="activeMode4" data-mode="4" title="Active - included when the touch sensor/button switches mode">
+                <input type="radio" class="btn-check" name="boardmode" id="modeLetbane" value="4" autocomplete="off">
+                <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeLetbane"><img src="/itube.webp" class="me-2" alt=""> Letbane</label>
+              </div>
+              <div class="mode-item" id="item5">
+                <input class="form-check-input mode-active" type="checkbox" id="activeMode5" data-mode="5" title="Active - included when the touch sensor/button switches mode">
+                <input type="radio" class="btn-check" name="boardmode" id="modeDkBus" value="5" autocomplete="off">
+                <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeDkBus"><img src="/ibus.webp" class="me-2" alt=""> Bus</label>
+              </div>
+              <div class="mode-item" id="item7">
+                <input class="form-check-input mode-active" type="checkbox" id="activeMode7" data-mode="7" title="Active - included when the touch sensor/button switches mode">
+                <input type="radio" class="btn-check" name="boardmode" id="modeMetro" value="7" autocomplete="off">
+                <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeMetro"><img src="/itube.webp" class="me-2" alt=""> Metro</label>
+              </div>
+            </div>
+          </div>
+          <div id="modesSe" class="mt-2" style="display:none">
+            <div class="small text-body-secondary mb-1 country-head"><span class="flag fse"></span> Sweden</div>
+            <div class="mode-row">
+              <div class="mode-item" id="item8">
+                <input class="form-check-input mode-active" type="checkbox" id="activeMode8" data-mode="8" title="Active - included when the touch sensor/button switches mode">
+                <input type="radio" class="btn-check" name="boardmode" id="modeSeMetro" value="8" autocomplete="off">
+                <label class="btn btn-outline-secondary d-flex align-items-center justify-content-center" for="modeSeMetro"><img src="/itube.webp" class="me-2" alt=""> Tunnelbana</label>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -126,6 +180,23 @@
           <label class="form-label" for="metroName">Metro Station</label>
           <input id="metroName" type="text" placeholder="Type the station name, e.g. Nørreport" class="form-control typeahead">
           <div class="form-text">A dedicated Copenhagen Metro board: round M1/M2/M3/M4 line badges and minute countdowns, same style as S-tog above - separate from every other mode so you can show it alongside them.</div>
+        </div>
+
+        <div class="mb-3" id="seMetroSearchBox" style="display:none">
+          <label class="form-label" for="seMetroName">Tunnelbana Station</label>
+          <input id="seMetroName" type="text" placeholder="Type the station name, e.g. T-Centralen" class="form-control typeahead">
+          <div class="form-text">A dedicated Stockholm tunnelbana board (Trafiklab): round line badges for 10, 11, 13, 14, 17, 18 and 19, half-minute countdowns and the stops each train calls at - all text in Swedish. Separate from every other mode, so you can show it alongside them.</div>
+        </div>
+
+        <div id="seInvalidToken" style="display:none;">
+          <div class="alert alert-danger d-flex align-items-center mb-3" role="alert">
+            <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-exclamation-triangle-fill flex-shrink-0 me-2" viewBox="0 0 16 16" role="img" aria-label="Warning:">
+              <path d="M8.982 1.566a1.13 1.13 0 0 0-1.96 0L.165 13.233c-.457.778.091 1.767.98 1.767h13.713c.889 0 1.438-.99.98-1.767L8.982 1.566zM8 5c.535 0 .954.462.9.995l-.35 3.507a.552.552 0 0 1-1.1 0L7.1 5.995A.905.905 0 0 1 8 5zm.002 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/>
+            </svg>
+            <div>
+              You must enter a valid Trafiklab API key to use this mode. Manage your API keys <a href="/keys.htm" class="alert-link">here</a>.
+            </div>
+          </div>
         </div>
 
         <div id="dkInvalidToken" style="display:none;">
@@ -429,11 +500,16 @@
                       <div class="small text-body-secondary">Which mode the board boots into after a restart or power loss - independent of the "Board Mode" picker above, which only changes what's showing right now</div>
                     </div>
                     <select id="startupMode" class="form-select w-auto">
-                      <option value="3">Tog</option>
-                      <option value="6">S-tog</option>
-                      <option value="4">Letbane</option>
-                      <option value="5">Bus</option>
-                      <option value="7">Metro</option>
+                      <optgroup label="Denmark">
+                        <option value="3">Tog</option>
+                        <option value="6">S-tog</option>
+                        <option value="4">Letbane</option>
+                        <option value="5">Bus</option>
+                        <option value="7">Metro</option>
+                      </optgroup>
+                      <optgroup label="Sweden">
+                        <option value="8">Tunnelbana</option>
+                      </optgroup>
                     </select>
                   </div>
                 </div>
@@ -706,7 +782,16 @@
   <script>
     const appState = {
       nrTimeOffset: 0,
-      boardMode: 3, //3=Tog, 6=S-tog, 4=Letbane, 5=Bus, 7=Metro
+      boardMode: 3, //3=Tog, 6=S-tog, 4=Letbane, 5=Bus, 7=Metro, 8=Tunnelbana (Sweden)
+      countries: {dk: true, se: false},
+      activeModes: {3: true, 4: true, 5: true, 6: true, 7: true, 8: true},
+      validTrafiklabKey: true,
+      trafiklabKey: "",
+      seMetroStationSelected: false,
+      seMetroName: "",
+      seMetroId: "",
+      seMetroLat: 0,
+      seMetroLon: 0,
       tzOK: true,
       hostnameOK: true,
       validRejseplanenKey: true,
@@ -781,6 +866,9 @@
       dkBusName: document.getElementById('dkBusName'),
       stogName: document.getElementById('stogName'),
       metroName: document.getElementById('metroName'),
+      seMetroName: document.getElementById('seMetroName'),
+      countryDk: document.getElementById('countryDk'),
+      countrySe: document.getElementById('countrySe'),
       startupMode: document.getElementById('startupMode')
     };
 
@@ -931,6 +1019,26 @@
       };
     };
 
+    // Same idea for the Swedish tunnelbana picker: proxied through the board's own /sestationpicker, which asks
+    // Trafiklab and returns just {name,id} pairs for stops served by the tunnelbana.
+    const substringMatcherSe = () => {
+      return (q, cb) => {
+        if (q.length > 1) {
+          $.ajax({
+            url: '/sestationpicker?q=' + encodeURIComponent(q),
+            method: 'GET',
+            success: function (data) { cb(data); },
+            error: function (xhr, status, error) {
+              console.error(`SE stop fetch failed: ${status} - ${error}`);
+              cb([]);
+            }
+          });
+        } else {
+          cb([]);
+        }
+      };
+    };
+
     $(function () {
       $('[data-bs-toggle="tooltip"]').tooltip();
     });
@@ -1006,6 +1114,19 @@
       delay: 300,
       updater: function (item) {
         handleMetroStationSelected(item);
+        return item;
+      },
+      highlighter: function (item) {
+        return '<img src="itube.webp" style="margin-right:6px">' + item;
+      }
+    });
+
+    $(elements.seMetroName).typeahead({
+      name: 'sestations',
+      source: substringMatcherSe(),
+      delay: 300,
+      updater: function (item) {
+        handleSeMetroStationSelected(item);
         return item;
       },
       highlighter: function (item) {
@@ -1175,6 +1296,10 @@
         if (!data.rejseplanenKey || data.rejseplanenKey.length < 8) {
           appState.validRejseplanenKey = false;
         }
+        appState.trafiklabKey = data.trafiklabKey || "";
+        if (!data.trafiklabKey || data.trafiklabKey.length < 8) {
+          appState.validTrafiklabKey = false;
+        }
       } catch (err) {
         console.warn("Could not load api keys.");
       }
@@ -1234,14 +1359,18 @@
       const dkbus = (mode === 5 && appState.validRejseplanenKey);
       const stog = (mode === 6 && appState.validRejseplanenKey);
       const metro = (mode === 7 && appState.validRejseplanenKey);
+      const semetro = (mode === 8 && appState.validTrafiklabKey);
+
+      applyCountries();
+      applyActiveModes();
 
       show("optShowServiceMsgs", dkrail || stog || metro);
-      show("optShowPlatform", dkrail || stog);
-      show("optShowOrdinals", dkrail || stog || metro);
-      show("optShowFullCalling", dkrail || stog || metro);
-      show("optShowFullMsgs", dkrail || stog || metro);
-      show("optNoScroll", dkrail || letbane || dkbus || stog || metro);
-      show("optRssFeed", dkrail || letbane || stog || metro);
+      show("optShowPlatform", dkrail || stog || semetro);
+      show("optShowOrdinals", dkrail || stog || metro || semetro);
+      show("optShowFullCalling", dkrail || stog || metro || semetro);
+      show("optShowFullMsgs", dkrail || stog || metro || semetro);
+      show("optNoScroll", dkrail || letbane || dkbus || stog || metro || semetro);
+      show("optRssFeed", dkrail || letbane || stog || metro || semetro);
       show("optNrTimeOffset", dkrail || stog || metro);
       show("optFastRefresh", dkrail || letbane || dkbus || stog || metro);
       show("optApiBudget", dkrail || letbane || dkbus || stog || metro);
@@ -1253,14 +1382,17 @@
       show("dkBusSearchBox", dkbus);
       show("stogSearchBox", stog);
       show("metroSearchBox", metro);
+      show("seMetroSearchBox", semetro);
       show("dkInvalidToken", (mode === 3 || mode === 4 || mode === 5 || mode === 6 || mode === 7) && !appState.validRejseplanenKey);
+      show("seInvalidToken", mode === 8 && !appState.validTrafiklabKey);
 
       if (
         (dkrail && appState.dkCrs) ||
         (letbane && appState.letbaneId) ||
         (dkbus && appState.dkBusId) ||
         (stog && appState.stogId) ||
-        (metro && appState.metroId)
+        (metro && appState.metroId) ||
+        (semetro && appState.seMetroId)
       ) {
         enableSave(true);
       } else {
@@ -1277,7 +1409,80 @@
       document.getElementById("modeDkBus").checked = (mode === 5);
       document.getElementById("modeStog").checked = (mode === 6);
       document.getElementById("modeMetro").checked = (mode === 7);
+      document.getElementById("modeSeMetro").checked = (mode === 8);
     }
+
+    // Country checkboxes decide which mode groups are offered. Ticking both shows both groups (each headed by
+    // its flag) so the board can switch between countries; one country must always stay ticked.
+    function applyCountries() {
+      const c = appState.countries;
+      elements.countryDk.checked = c.dk;
+      elements.countrySe.checked = c.se;
+      document.getElementById("modesDk").style.display = c.dk ? "block" : "none";
+      document.getElementById("modesSe").style.display = c.se ? "block" : "none";
+      document.getElementById("modeSelector").classList.toggle("multi", c.dk && c.se);
+    }
+
+    const ALL_MODES = [3, 6, 4, 5, 7, 8];
+    const modeCountry = (m) => (m === 8 ? "se" : "dk");
+    const modeHasLocation = (m) => !!({3: appState.dkCrs, 4: appState.letbaneId, 5: appState.dkBusId,
+                                       6: appState.stogId, 7: appState.metroId, 8: appState.seMetroId}[m]);
+    // Modes that can currently be shown: active, and in a ticked country.
+    const selectableModes = () => ALL_MODES.filter(m => appState.activeModes[m] && appState.countries[modeCountry(m)]);
+
+    // Reflects the active ticks onto the checkboxes/buttons: an unticked mode is dimmed and can't be picked.
+    function applyActiveModes() {
+      for (const m of ALL_MODES) {
+        const on = !!appState.activeModes[m];
+        document.getElementById("activeMode" + m).checked = on;
+        document.getElementById("item" + m).classList.toggle("inactive", !on);
+        document.querySelector('input[name=boardmode][value="' + m + '"]').disabled = !on;
+      }
+    }
+
+    // The selected mode has to stay one that is active and visible - pick the nearest alternative.
+    function ensureSelectedModeUsable() {
+      const usable = selectableModes();
+      if (usable.includes(appState.boardMode)) return;
+      const sameCountry = usable.filter(m => modeCountry(m) === modeCountry(appState.boardMode));
+      if (sameCountry.length) appState.boardMode = sameCountry[0];
+      else if (usable.length) appState.boardMode = usable[0];
+    }
+
+    function handleModeActiveChange(e) {
+      const m = parseInt(e.target.dataset.mode);
+      const on = e.target.checked;
+      if (!on) {
+        // never leave the board with nothing active
+        const others = selectableModes().filter(x => x !== m);
+        if (!others.length) { e.target.checked = true; return; }
+      }
+      appState.activeModes[m] = on;
+      ensureSelectedModeUsable();
+      applyBoardMode();
+    }
+    for (const m of ALL_MODES) document.getElementById("activeMode" + m).addEventListener("change", handleModeActiveChange);
+
+    function handleCountryChange(e) {
+      const dk = elements.countryDk.checked;
+      const se = elements.countrySe.checked;
+      if (!dk && !se) {   // never leave the board with no country
+        e.target.checked = true;
+        return;
+      }
+      // Ticking a country switches its configured modes on (or its main mode, if none is configured yet).
+      for (const c of ["dk", "se"]) {
+        if (appState.countries[c] || !(c === "dk" ? dk : se)) continue;
+        const mine = ALL_MODES.filter(m => modeCountry(m) === c);
+        const configured = mine.filter(modeHasLocation);
+        for (const m of (configured.length ? configured : [mine[0]])) appState.activeModes[m] = true;
+      }
+      appState.countries = {dk: dk, se: se};
+      ensureSelectedModeUsable();
+      applyBoardMode();
+    }
+    elements.countryDk.addEventListener("change", handleCountryChange);
+    elements.countrySe.addEventListener("change", handleCountryChange);
 
     // DK Tog/Letbane/DK Bus/S-tog station fields are name-search typeaheads (see substringMatcherDk()
     // and the handle*Selected()/handle*LostFocus() functions below), same pattern as the National
@@ -1297,6 +1502,8 @@
     elements.stogName.addEventListener("blur", () => setTimeout(handleStogStationLostFocus, 500));
     elements.metroName.addEventListener("focus", () => elements.metroName.select());
     elements.metroName.addEventListener("blur", () => setTimeout(handleMetroStationLostFocus, 500));
+    elements.seMetroName.addEventListener("focus", () => elements.seMetroName.select());
+    elements.seMetroName.addEventListener("blur", () => setTimeout(handleSeMetroStationLostFocus, 500));
 
     function getCurrentLocationConfig() {
         let config = {
@@ -1339,12 +1546,19 @@
             config.stogLat = 0;
             config.stogLon = 0;
             config.filter = "";
-        } else { // Metro
+        } else if (appState.boardMode === 7) { // Metro
             config.name = appState.metroName || appState.metroId;
             config.metroName = config.name;
             config.metroId = appState.metroId;
             config.metroLat = 0;
             config.metroLon = 0;
+            config.filter = "";
+        } else { // Tunnelbana (Sweden)
+            config.name = appState.seMetroName || appState.seMetroId;
+            config.seMetroName = config.name;
+            config.seMetroId = appState.seMetroId;
+            config.seMetroLat = 0;
+            config.seMetroLon = 0;
             config.filter = "";
         }
         return config;
@@ -1360,6 +1574,7 @@
             if (mode === 5) return '<img src="/ibus.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             if (mode === 6) return '<img src="/irail.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             if (mode === 7) return '<img src="/itube.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
+            if (mode === 8) return '<img src="/itube.webp" style="height:13px; margin-right:6px; vertical-align:middle;">';
             return '';
         };
 
@@ -1436,8 +1651,33 @@
       appState.stogId = s.stogId || "";
       appState.metroName = s.metroName || "";
       appState.metroId = s.metroId || "";
+      appState.seMetroName = s.seMetroName || "";
+      appState.seMetroId = s.seMetroId || "";
 
       appState.boardMode = s.mode ?? 3;
+      // Which countries are ticked: as saved, otherwise worked out from what is configured (and, for a brand
+      // new board, from which API key has been entered).
+      const dkUsed = !!(s.dkCrs || s.letbaneId || s.dkBusId || s.stogId || s.metroId);
+      const seUsed = !!s.seMetroId;
+      if (Array.isArray(s.countries) && s.countries.length) {
+        appState.countries = {dk: s.countries.includes("dk"), se: s.countries.includes("se")};
+      } else {
+        const swedishOnlyKey = !!appState.trafiklabKey && !appState.rejseplanenKey;
+        appState.countries = {dk: dkUsed || !(seUsed || swedishOnlyKey), se: seUsed || swedishOnlyKey};
+      }
+      if (appState.boardMode === 8 && !appState.countries.se) appState.countries.se = true;
+      if (appState.boardMode !== 8 && !appState.countries.dk) appState.countries.dk = true;
+      if (!appState.countries.dk && !appState.countries.se) appState.countries.dk = true;
+      if (!dkUsed && !seUsed && appState.countries.se && !appState.countries.dk) appState.boardMode = 8;
+
+      // Active modes: as saved; otherwise every mode that has a location (what the board always did), or - on a
+      // board with nothing configured yet - all of them so any can be picked and set up.
+      const configuredModes = ALL_MODES.filter(modeHasLocation);
+      const savedActive = Array.isArray(s.activeModes) && s.activeModes.length ? s.activeModes : null;
+      for (const m of ALL_MODES) {
+        appState.activeModes[m] = savedActive ? savedActive.includes(m) : (configuredModes.length ? configuredModes.includes(m) : true);
+      }
+      appState.activeModes[appState.boardMode] = true;   // whatever is showing now is active
       highlightModeButtons(appState.boardMode);
       // Independent of appState.boardMode above (which is just "which tab is being edited right
       // now") - falls back to whatever "mode" is (today's boot behaviour) for a board saved before
@@ -1455,6 +1695,7 @@
       elements.dkBusName.value = appState.dkBusName;
       elements.stogName.value = appState.stogName;
       elements.metroName.value = appState.metroName;
+      elements.seMetroName.value = appState.seMetroName;
       elements.brightness.value = s.brightness ?? 50;
       const pct = (elements.brightness.value / 255) * 100;
       elements.brightness.title = Math.round(pct) + "%";
@@ -1594,6 +1835,18 @@
       else appState.metroStationSelected = false;
     }
 
+    function handleSeMetroStationSelected(item) {
+      appState.seMetroStationSelected = true;
+      appState.seMetroName = item.name;
+      appState.seMetroId = item.id;
+      enableSave(true);
+    }
+
+    function handleSeMetroStationLostFocus() {
+      if (!appState.seMetroStationSelected) elements.seMetroName.value = appState.seMetroName;
+      else appState.seMetroStationSelected = false;
+    }
+
     function handleBrightnessChange() {
       const brightness = this.value;
       appState.jsonSettings.brightness = brightness;
@@ -1675,6 +1928,14 @@
         s.metroLat = 0;
         s.metroLon = 0;
       }
+      if (appState.seMetroId) {
+        s.seMetroName = appState.seMetroName || appState.seMetroId;
+        s.seMetroId = appState.seMetroId;
+        s.seMetroLat = 0;
+        s.seMetroLon = 0;
+      }
+      s.countries = [appState.countries.dk ? "dk" : null, appState.countries.se ? "se" : null].filter(Boolean);
+      s.activeModes = selectableModes();
       if (isChecked("optTZ") && elements.customTZ.value.trim().length) s.TZ = elements.customTZ.value.trim(); else delete s.TZ;
       if (isChecked("optHost") && elements.customHost.value.trim().length) s.hostname = elements.customHost.value.trim(); else delete s.hostname;
       s.enableScheduler = document.getElementById('enableScheduler').checked;
