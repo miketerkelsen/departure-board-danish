@@ -517,6 +517,14 @@ enum boardModes {
 };
 boardModes boardMode = MODE_DKRAIL;
 
+// Waking from sleep resumes whatever mode was showing when the board went to sleep. A tap of the touch
+// sensor/button switches the live mode without saving it, and the config's "mode" is only whatever the web
+// page last saved - reloading that on wake sent a board you had tapped back to Tog the evening before up as
+// Tunnelbana (or whatever was selected at the last Save) the next morning. wakeMode carries the live mode
+// across the config reload; resumeLiveMode makes loadSlot() keep it instead of re-reading "mode".
+static boardModes wakeMode = MODE_LOADCONFIG;
+static bool resumeLiveMode = false;
+
 // The Copenhagen Metro board and the Stockholm tunnelbana board share the round line badge and the half-minute
 // countdown; the Swedish board additionally uses Swedish text throughout.
 static inline bool isMetroBoard() { return boardMode==MODE_METRO || boardMode==MODE_SE_METRO; }
@@ -1601,7 +1609,7 @@ void loadSlot(JsonObjectConst slot, bool isDefault, boardModes requestedMode) {
       boardModes cand = order[(cur+step)%n];
       if (modeEnabled(cand)) { boardMode = cand; break; }
     }
-  } else {
+  } else if (!(isDefault && resumeLiveMode)) {
     if (slot["mode"].is<int>()) boardMode = slot["mode"];
   }
 
@@ -1724,6 +1732,7 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
 
   schedulerActive = false;
   carouselActive = false;
+  resumeLiveMode = false;
 
   if (LittleFS.exists("/config.json")) {
     File file = LittleFS.open("/config.json", "r");
@@ -1808,6 +1817,16 @@ void loadConfig(bool coldBoot = false, boardModes requestedMode = MODE_LOADCONFI
           } else if (settings[F("mode")].is<int>()) {
             boardMode = settings[F("mode")];
           }
+        }
+
+        // Resume the live mode after a wake from sleep (see wakeMode). Only for a plain board: the scheduler and
+        // the carousel pick the mode by time/slot, and the mode must still be configured and ticked active.
+        if (wakeMode != MODE_LOADCONFIG) {
+          if (!coldBoot && requestedMode == MODE_LOADCONFIG && !applyStartupMode && !enableScheduler && !enableCarousel && modeEnabled(wakeMode)) {
+            boardMode = wakeMode;
+            resumeLiveMode = true;
+          }
+          wakeMode = MODE_LOADCONFIG;
         }
 
         if (coldBoot) {
@@ -5165,7 +5184,8 @@ void loop(void) {
     drawSleepingScreen();
     timer=millis() + SCREENSAVERINTERVAL;
   } else if (wasSleeping && !isSleeping) {
-    // Exit sleep mode cleanly
+    // Exit sleep mode cleanly, back in the mode that was showing before the board went to sleep
+    wakeMode = boardMode;
     softResetBoard(MODE_LOADCONFIG);
   } else if (isSleeping && !wasSleeping && useNSEclockForSleep && !NSEclockIsActive) u8g2.setContrast(DIMMED_BRIGHTNESS);
 
