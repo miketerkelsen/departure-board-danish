@@ -110,6 +110,46 @@ static void stripMunicipalitySuffix(char* stop) {
     }
 }
 
+// Skånetrafiken's trains (the Øresund trains between Copenhagen and Sweden, and the local Pågatåg) reach us with
+// the non-ASCII letters of their DESTINATION text already lost upstream - Rejseplanen's own JSON carries
+// "sterport", "G teborg C", "K benhavn H", "Malm  C", "V xj": a space where å/ä/ö/ø stood, or the letter simply
+// gone (Ø, a final ö). The same names from DSB trains arrive intact. A letter that was never sent can't be
+// recovered, but these routes serve a small fixed set of destinations, so a damaged name is matched against the
+// real spelling by its ASCII letters alone ("sterport" -> Østerport, "Malm  C" -> Malmö C). Only names that
+// contain no non-ASCII byte at all are considered (anything with a real accented letter is already right), and
+// only names whose real spelling has one - a table entry without an accented letter could never be damaged.
+static const char *const kDamagedDestinationFixes[] = {
+    "Østerport", "København H", "Göteborg C", "Hässleholm", "Malmö C", "Ramlösa station", "Växjö",
+    "Ängelholm", "Älmhult", "Nässjö C", "Åstorp", "Höör", "Örkelljunga", "Ödåkra", "Jönköping C",
+    "Linköping C", "Norrköping C", "Örebro C", "Södertälje", "Kävlinge", "Löddeköpinge", "Bjärred",
+    "Höllviken", "Åhus", "Båstad", "Köpenhamn"
+};
+
+static void asciiLetterKey(const char *s, char *out, size_t outSize) {
+    size_t j = 0;
+    for (; *s && j + 1 < outSize; s++) {
+        unsigned char c = (unsigned char)*s;
+        if (c < 0x80 && isalnum(c)) out[j++] = (char)tolower(c);
+    }
+    out[j] = '\0';
+}
+
+static void repairDamagedDestination(char *dest, size_t destSize) {
+    for (const unsigned char *p = (const unsigned char *)dest; *p; p++) if (*p >= 0x80) return;   // already has real accented letters
+    char key[48];
+    asciiLetterKey(dest, key, sizeof(key));
+    if (!key[0]) return;
+    for (size_t i = 0; i < sizeof(kDamagedDestinationFixes) / sizeof(kDamagedDestinationFixes[0]); i++) {
+        char fixKey[48];
+        asciiLetterKey(kDamagedDestinationFixes[i], fixKey, sizeof(fixKey));
+        // A plain-ASCII name equal to its own key (no accented letter in the real spelling) can't be a damaged one.
+        if (strcmp(key, fixKey) == 0 && strcmp(dest, kDamagedDestinationFixes[i]) != 0) {
+            strlcpy(dest, kDamagedDestinationFixes[i], destSize);
+            return;
+        }
+    }
+}
+
 // Called when a Departure record's closing '}' is seen - reconcile the scratch fields
 // collected (in whatever order the JSON delivered them) into the next service slot.
 void rejseplanenClient::finaliseDepartureRecord() {
@@ -123,6 +163,7 @@ void rejseplanenClient::finaliseDepartureRecord() {
     truncateSeconds(svc.sTime);
 
     strlcpy(svc.destination, raw.direction, sizeof(svc.destination));
+    repairDamagedDestination(svc.destination, sizeof(svc.destination));   // see kDamagedDestinationFixes
     convertDanishToLatin1(svc.destination, sizeof(svc.destination));
 
     strlcpy(svc.via, raw.name, sizeof(svc.via));
