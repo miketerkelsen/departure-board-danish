@@ -193,6 +193,17 @@ void rejseplanenClient::finaliseDepartureRecord() {
     xStation->numServices++;
 }
 
+// The time a train calls at the stop being parsed: the real-time one where Rejseplanen gives one, otherwise the
+// timetable one. Previously only the timetable times (arrTime/depTime) were read, so a delayed train's whole
+// "Stopper ved" list showed the times it WOULD have called at if it were running to time. Arrival is still
+// preferred over departure, as before (the first stop of a journey only has a departure).
+const char *rejseplanenClient::stopCallTime() const {
+    if (stopScratchRtArrTime[0]) return stopScratchRtArrTime;
+    if (stopScratchArrTime[0]) return stopScratchArrTime;
+    if (stopScratchRtDepTime[0]) return stopScratchRtDepTime;
+    return stopScratchDepTime;
+}
+
 // Called when a Stop element of a departure's Stops list closes (see stopsInBoard): adds it to the
 // "calling at" text of the departure currently being parsed - which is the rdiService slot at
 // numServices, not yet counted - in the same "Name (HH:MM)" format getServiceDetails() builds from a
@@ -210,7 +221,7 @@ void rejseplanenClient::appendBoardStop() {
     convertDanishToLatin1(entry, sizeof(entry));
     // Arrival time where there is one - same preference as finaliseCallingStop() - and no times at all on
     // S-tog, as in getServiceDetails(). ProductAtStop comes before Stops in the JSON, so catOut is known.
-    const char *t = stopScratchArrTime[0] ? stopScratchArrTime : stopScratchDepTime;
+    const char *t = stopCallTime();
     if (t[0] && strlen(t) >= 5 && !containsCaseInsensitive(raw.catOut, "S-Tog")) {
         size_t n = strlen(entry);
         if (n + 9 < sizeof(entry)) snprintf(entry + n, sizeof(entry) - n, " (%.5s)", t);
@@ -251,7 +262,7 @@ void rejseplanenClient::finaliseCallingStop() {
     strlcpy(callingStops[numCallingStops].extId, stopScratchExtId, sizeof(callingStops[0].extId));
     // Prefer the arrival time (when the train reaches this calling point), falling back to the
     // departure time for stops that only have one (e.g. the very first/last stop of the journey).
-    strlcpy(callingStops[numCallingStops].time, stopScratchArrTime[0] ? stopScratchArrTime : stopScratchDepTime, sizeof(callingStops[0].time));
+    strlcpy(callingStops[numCallingStops].time, stopCallTime(), sizeof(callingStops[0].time));
     callingStops[numCallingStops].routeIdx = stopScratchRouteIdx;
     numCallingStops++;
 }
@@ -346,12 +357,16 @@ void rejseplanenClient::value(const char *value) {
             else if (strcmp(f,"extId")==0) strlcpy(stopScratchExtId,value,sizeof(stopScratchExtId));
             else if (strcmp(f,"arrTime")==0) strlcpy(stopScratchArrTime,value,sizeof(stopScratchArrTime));
             else if (strcmp(f,"depTime")==0) strlcpy(stopScratchDepTime,value,sizeof(stopScratchDepTime));
+            else if (strcmp(f,"rtArrTime")==0) strlcpy(stopScratchRtArrTime,value,sizeof(stopScratchRtArrTime));
+            else if (strcmp(f,"rtDepTime")==0) strlcpy(stopScratchRtDepTime,value,sizeof(stopScratchRtDepTime));
         }
     } else {
         if (strcmp(currentPath,"Stops/Stop/name")==0) strlcpy(stopScratchName,value,sizeof(stopScratchName));
         else if (strcmp(currentPath,"Stops/Stop/extId")==0) strlcpy(stopScratchExtId,value,sizeof(stopScratchExtId));
         else if (strcmp(currentPath,"Stops/Stop/arrTime")==0) strlcpy(stopScratchArrTime,value,sizeof(stopScratchArrTime));
         else if (strcmp(currentPath,"Stops/Stop/depTime")==0) strlcpy(stopScratchDepTime,value,sizeof(stopScratchDepTime));
+        else if (strcmp(currentPath,"Stops/Stop/rtArrTime")==0) strlcpy(stopScratchRtArrTime,value,sizeof(stopScratchRtArrTime));
+        else if (strcmp(currentPath,"Stops/Stop/rtDepTime")==0) strlcpy(stopScratchRtDepTime,value,sizeof(stopScratchRtDepTime));
         else if (strcmp(currentPath,"Stops/Stop/routeIdx")==0) stopScratchRouteIdx = atoi(value);
         // See rjDirectionSegment's own comment - only present at all for a splitting service.
         // Requires arrayElementKeyByDepth's general nested-array fix (see startObject()) to ever see
@@ -417,7 +432,7 @@ void rejseplanenClient::startObject() {
             }
         }
         else if (fetchingTrip) { if (!tripFound) resetRawRecord(); }
-        else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; stopScratchRouteIdx = -1; }
+        else { stopScratchName[0] = '\0'; stopScratchExtId[0] = '\0'; stopScratchArrTime[0] = '\0'; stopScratchDepTime[0] = '\0'; stopScratchRtArrTime[0] = '\0'; stopScratchRtDepTime[0] = '\0'; stopScratchRouteIdx = -1; }
     }
 
     // Array elements have no key() call of their own. For a NEW target-array element, use the
@@ -454,6 +469,8 @@ void rejseplanenClient::startObject() {
         stopScratchExtId[0] = 0;
         stopScratchArrTime[0] = 0;
         stopScratchDepTime[0] = 0;
+        stopScratchRtArrTime[0] = 0;
+        stopScratchRtDepTime[0] = 0;
         boardStopPending = false;
     }
     if (keyToPush[0]) {

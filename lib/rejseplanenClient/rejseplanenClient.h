@@ -88,6 +88,11 @@ class rejseplanenClient: public JsonListenerGS {
         char stopScratchExtId[16];
         char stopScratchArrTime[9];
         char stopScratchDepTime[9];
+        // Real-time arrival/departure at this stop (rtArrTime/rtDepTime) where Rejseplanen has one - present for a
+        // train it is tracking, absent otherwise. See stopCallTime().
+        char stopScratchRtArrTime[9];
+        char stopScratchRtDepTime[9];
+        const char *stopCallTime() const;
         int stopScratchRouteIdx = -1;
         // Directions/Direction's "value" arrives before its "routeIdxTo" in every response seen live
         // (value, flag, routeIdxFrom, routeIdxTo, in that order) - held here until routeIdxTo shows
