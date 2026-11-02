@@ -2846,8 +2846,36 @@ bool drawCurrentTimeUG() {
   }
 }
 
+// How many seconds ago the Letbane departure at index idx left (negative = still to come). Measured against the
+// same time the row counts down to - the real-time time when there is one, otherwise the timetable time - so a
+// delayed tram is not treated as gone while it is still due. Letbane times carry no seconds, so a departure is
+// taken to leave at the start of its minute.
+static long letbaneSecondsSinceDeparture(int idx) {
+  const char *timeStr = isDigit(station.service[idx].etd[0]) ? station.service[idx].etd : station.service[idx].sTime;
+  int h=0, m=0;
+  sscanf(timeStr,"%d:%d",&h,&m);
+  long deltaSec = (long)(h*3600+m*60) - (long)(timeinfo.tm_hour*3600+timeinfo.tm_min*60+timeinfo.tm_sec);
+  if (deltaSec < -3600) deltaSec += 86400;   // rolled over past midnight - tomorrow's early departure, not one that left
+  return -deltaSec;
+}
+
+// A Letbane departure comes off the board LETBANE_DROP_AFTER_SEC seconds after its departure time, instead of
+// blinking "1 min" until the next refresh happens to stop returning it (which, at the refresh interval, could be
+// minutes). The list is in time order, so only the front needs checking. Returns whether anything was removed.
+#define LETBANE_DROP_AFTER_SEC 60
+static bool dropDepartedLetbane() {
+  bool dropped = false;
+  while (station.numServices && letbaneSecondsSinceDeparture(0) >= LETBANE_DROP_AFTER_SEC) {
+    promoteNextService();
+    dropped = true;
+  }
+  if (dropped) station.origin[0] = '\0';   // described the tram that just left
+  return dropped;
+}
+
 void updateArrivals() {
   rejseplanenData.loadDepartures(&station,&messages);
+  if (boardMode == MODE_LETBANE) dropDepartedLetbane();   // a fresh list may still carry one that has just left
   lastDataLoadTime = millis();
   noDataLoaded = false; noDataFailureStreak = 0;
   dataLoadSuccess++;
@@ -4070,9 +4098,24 @@ void undergroundArrivalsLoop() {
   // nothing else in this loop repaints them on a fast enough cadence when idle between fetches.
   if (boardMode == MODE_LETBANE && !isScrollingPrimary && !isSleeping && station.numServices && millis() > letbaneBlinkTimer) {
     letbaneBlinkTimer = millis() + 500;
-    drawUndergroundService(0,ULINE1,(showTubeCurrentLocation && isShowingVia && station.origin[0]));
-    if (station.numServices>1) drawUndergroundService(1,ULINE2);
-    u8g2.updateDisplayArea(0,1,32,6); // wide enough to cover both primary rows, not just row 0
+    // Remove a tram 60 seconds after it left (see dropDepartedLetbane()) and move the next ones up.
+    if (dropDepartedLetbane()) {
+      if (!isScrollingService) serviceTimer = millis();   // let the rotating third row pick up the shifted list
+      if (station.numServices < 2) blankArea(0,ULINE2,256,10);   // the second row has nothing to show any more
+      if (!station.numServices) {
+        // Nothing left locally before the next refresh lands - say so rather than show "no planned departures".
+        setTubeFont();
+        blankArea(0,ULINE1,256,ULINE3-ULINE1);
+        centreText("Opdaterer afgange...",ULINE1-1);
+        u8g2.updateDisplayArea(0,1,32,6);
+        requestEarlyFetch();   // bounded: at most one per 45 seconds
+      }
+    }
+    if (station.numServices) {
+      drawUndergroundService(0,ULINE1,(showTubeCurrentLocation && isShowingVia && station.origin[0]));
+      if (station.numServices>1) drawUndergroundService(1,ULINE2);
+      u8g2.updateDisplayArea(0,1,32,6); // wide enough to cover both primary rows, not just row 0
+    }
   }
 
   // Check if we're showing currentLocation
