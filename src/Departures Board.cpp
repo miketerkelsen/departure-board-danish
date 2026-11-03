@@ -148,6 +148,15 @@ U8G2_SSD1322_NHD_256X64_F_4W_HW_SPI u8g2(U8G2_R0, /* cs=*/ GPIO_NUM_26, /* dc=*/
 #define ULINE2 28
 #define ULINE3 41
 #define ULINE4 56
+#define LETBANE_RULE_Y 53   // Letbane board: the full-width rule just above the clock (the clock's digits sit on the bottom rows)
+// Letbane board text (everything except the header): the same custom font the Tog mode's primary row uses
+// (NatRailTall12, 9px capitals; ASCII only, so å/æ/ø/Å... are borrowed from the matching stock 6x13 font, as there).
+// It used to be the larger Underground10, briefly the small row font (7px capitals), then stock fonts. Capitals start
+// on the same row as the small font's did, so LETBANE_DY is 0; the rows are 13px apart and this font plus its
+// descenders is 13px tall, so the rows touch but don't overlap - which is also why each row only clears its own 13px.
+#define LETBANE_FONT NatRailTall12
+#define LETBANE_ACCENT u8g2_font_6x13_tf
+#define LETBANE_DY 0
 
 static Ticker restartTimer; // used to schedule reboots
 
@@ -908,8 +917,9 @@ void setSmallFont() {
 void setTallFont() {
   u8g2.setFont(NatRailTall12);
 }
+// The Letbane board's text font - see LETBANE_FONT. Only the Letbane board calls this.
 void setTubeFont() {
-  u8g2.setFont(Underground10);
+  u8g2.setFont(LETBANE_FONT);
 }
 void setHeaderFont() {
   u8g2.setFont(NatRailSmall9);
@@ -1231,12 +1241,13 @@ void showUpdateIcon(bool show) {
     } else {
       u8g2.setFont(NatRailTall12);
       u8g2.drawStr(0,50,"}");
-      if (boardMode == MODE_LETBANE) u8g2.setFont(Underground10);
+      if (boardMode == MODE_LETBANE) setTubeFont();
       else u8g2.setFont(NatRailSmall9);
     }
     updateIconVisible = true;
   } else {
     if (noServiceClockIsActive) blankArea(0,0,6,6); else blankArea(0,50,6,13);
+    if (boardMode == MODE_LETBANE && !noServiceClockIsActive) u8g2.drawHLine(0,LETBANE_RULE_Y,6);   // put back the part of the rule the icon covered
     updateIconVisible = false;
   }
   if (noServiceClockIsActive) u8g2.updateDisplayArea(0,0,1,1); else u8g2.updateDisplayArea(0,6,1,2);
@@ -2827,6 +2838,37 @@ void waitForFirstLoad() {
 
 // Draw the TfL clock (if the time has changed)
 bool drawCurrentTimeUG() {
+  if (boardMode == MODE_LETBANE) {
+    // Letbane footer: a rule across the whole display with the clock under it, HH:MM, right-aligned, in the same
+    // font and size as the departure rows (7px digits). Only the minute is shown, so it is redrawn when the minute
+    // changes - or when a full redraw cleared the screen, which resets displayedTime (see drawUndergroundBoard()).
+    // The rule is redrawn with it, which also restores any part of it that the data-update icon covered.
+    if (strncmp(displayedTime,currentTime,5) == 0 && displayedTime[0]) return false;
+    char hhmm[6];
+    strlcpy(hhmm,currentTime,sizeof(hhmm));
+    setTubeFont();   // the Letbane row font - see its comment
+    // Put the digits' bottom edge on the last row of the screen, from the font's own metrics (the same ink
+    // arithmetic drawLineBadge() uses), instead of guessing at the font's reference position.
+    int y = ULINE4;
+    {
+      u8g2_t *u = u8g2.getU8g2();
+      int8_t gw,gh,gx,gy;
+      if (getGlyphBox(u,'0',&gw,&gh,&gx,&gy)) y = SCREEN_HEIGHT - (u8g2_GetFontAscent(u)+1) + gy;
+    }
+    int x = SCREEN_WIDTH - u8g2.getStrWidth(hhmm);
+    blankArea(SCREEN_WIDTH-48,LETBANE_RULE_Y+2,48,SCREEN_HEIGHT-(LETBANE_RULE_Y+2));
+    u8g2.drawHLine(0,LETBANE_RULE_Y,SCREEN_WIDTH);
+    u8g2.drawStr(x,y,hhmm);
+    u8g2.updateDisplayArea(0,6,32,2);
+    strcpy(displayedTime,currentTime);
+    setTubeFont();
+    if (dateEnabled && timeinfo.tm_mday!=dateDay) {
+      drawStationHeader(locationName,"",locationFilter,0);
+      u8g2.sendBuffer();  // Just refresh on new date
+      setTubeFont();
+    }
+    return true;
+  }
   if (strcmp(displayedTime,currentTime)) {
     u8g2.setFont(UndergroundClock8);
     blankArea(99,ULINE4,58,8);
@@ -2886,7 +2928,10 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
   int usedSpace = 4;
 
   setTubeFont();
-  blankArea(0,y,256,10);
+  // This row's own 13 pixel rows: the one above the text (a borrowed accent can rise a pixel) down through the
+  // descenders - and no further, or it would wipe the descenders of the row above.
+  blankArea(0,y-1,256,13);
+  const int ty = y - 1 + LETBANE_DY;   // where the text is drawn - see LETBANE_DY
 
   if (serviceId < station.numServices) {
     // Rejseplanen doesn't provide a "seconds/minutes to arrival" countdown like TfL, so compute an
@@ -2903,19 +2948,22 @@ void drawUndergroundService(int serviceId, int y, bool isShowingCurrentLocation 
     int timeWidth = getStringWidth(letbaneTime);
     // Blink the time (500ms on/off) once it's due or arriving within a minute, to draw the eye to it
     bool blinkVisible = (delta > 1) || ((millis()/500) % 2 == 0);
-    if (blinkVisible) u8g2.drawStr(SCREEN_WIDTH-timeWidth,y-1,letbaneTime);
+    if (blinkVisible) u8g2.drawStr(SCREEN_WIDTH-timeWidth,ty,letbaneTime);
     usedSpace += timeWidth + 8;
 
     if (isShowingCurrentLocation) sprintf(serviceData,"%d %s",serviceId+1,station.origin);
     else sprintf(serviceData,"%d %s",serviceId+1,station.service[serviceId].destination);
-    if (getMixedStringWidth(serviceData,u8g2_font_6x10_tf) > SCREEN_WIDTH-usedSpace) {
-      while (getMixedStringWidth(serviceData,u8g2_font_6x10_tf) > SCREEN_WIDTH-usedSpace-6) {
+    // A name that doesn't fit is cut and ends in "...". Measured and drawn with the borrowed-accent routines, since the
+    // row font itself is ASCII only.
+    if (getMixedStringWidth(serviceData,LETBANE_ACCENT) > SCREEN_WIDTH-usedSpace) {
+      const int ellipsisW = getStringWidth("...");
+      while (serviceData[0] && getMixedStringWidth(serviceData,LETBANE_ACCENT) > SCREEN_WIDTH-usedSpace-ellipsisW-2) {
         serviceData[strlen(serviceData)-1] = '\0';
       }
       if (serviceData[strlen(serviceData)-1] == ' ') serviceData[strlen(serviceData)-1] = '\0'; // remove any trailing space
-      strcat(serviceData,"\x81");
+      strcat(serviceData,"...");
     }
-    drawMixedStr(0,y-1,serviceData,u8g2_font_6x10_tf);
+    drawMixedStr(0,ty,serviceData,LETBANE_ACCENT);
   }
 }
 
@@ -2928,6 +2976,7 @@ void drawUndergroundBoard() {
     u8g2.clearBuffer();
     u8g2.setContrast(brightness);
     firstLoad=false;
+    displayedTime[0] = '\0';   // the footer (rule + clock) went with the buffer - have drawCurrentTimeUG() put it back
   } else {
       // Clear the top three lines
       blankArea(0,ULINE0,256,ULINE3-1);
@@ -2944,7 +2993,7 @@ void drawUndergroundBoard() {
     line3Service = 99;
     prevScrollStopsLength = 0;
     currentMessage=99;
-    blankArea(0,ULINE3,256,11);
+    blankArea(0,ULINE3-1,256,13);
     serviceTimer=0;
   } else {
     // Draw the primary service line(s)
@@ -2953,7 +3002,7 @@ void drawUndergroundBoard() {
       if (station.numServices>1) drawUndergroundService(1,ULINE2);
     } else {
       setTubeFont();
-      centreText("Der er ingen planlagte afgange fra denne station.",ULINE1-1);
+      centreText("Der er ingen planlagte afgange fra denne station.",ULINE1-1+LETBANE_DY);
     }
   }
 
@@ -4069,7 +4118,7 @@ void undergroundArrivalsLoop() {
     } else {
       setTubeFont();
       blankArea(0,ULINE1,256,ULINE3-ULINE1);
-      centreText("Der er ingen planlagte afgange fra denne station.",ULINE1-1);
+      centreText("Der er ingen planlagte afgange fra denne station.",ULINE1-1+LETBANE_DY);
     }
     fullRefresh = true;
   }
@@ -4101,12 +4150,12 @@ void undergroundArrivalsLoop() {
     // Remove a tram 60 seconds after it left (see dropDepartedLetbane()) and move the next ones up.
     if (dropDepartedLetbane()) {
       if (!isScrollingService) serviceTimer = millis();   // let the rotating third row pick up the shifted list
-      if (station.numServices < 2) blankArea(0,ULINE2,256,10);   // the second row has nothing to show any more
+      if (station.numServices < 2) blankArea(0,ULINE2-1,256,13);   // the second row has nothing to show any more
       if (!station.numServices) {
         // Nothing left locally before the next refresh lands - say so rather than show "no planned departures".
         setTubeFont();
         blankArea(0,ULINE1,256,ULINE3-ULINE1);
-        centreText("Opdaterer afgange...",ULINE1-1);
+        centreText("Opdaterer afgange...",ULINE1-1+LETBANE_DY);
         u8g2.updateDisplayArea(0,1,32,6);
         requestEarlyFetch();   // bounded: at most one per 45 seconds
       }
@@ -4156,7 +4205,7 @@ void undergroundArrivalsLoop() {
             currentMessage=0;
           }
         }
-        scrollStopsLength = getMixedStringWidth(line2[currentMessage],u8g2_font_6x10_tf);
+        scrollStopsLength = getMixedStringWidth(line2[currentMessage],LETBANE_ACCENT);
       } else {
         scrollStopsLength=SCREEN_WIDTH;
       }
@@ -4164,23 +4213,23 @@ void undergroundArrivalsLoop() {
   }
 
   if (isScrollingService && millis()>serviceTimer && !isSleeping) {
-    blankArea(0,ULINE3,256,10);
+    blankArea(0,ULINE3-1,256,13);
     if (scrollServiceYpos) {
       // we're scrolling up the message initially
-      u8g2.setClipWindow(0,ULINE3,256,ULINE3+10);
+      u8g2.setClipWindow(0,ULINE3-1,256,ULINE3+12);
       // Was the previous display a service?
       if (prevService<station.numServices) {
         drawUndergroundService(prevService,scrollServiceYpos+ULINE3-13);
       } else {
         // if the previous message didn't scroll then we need to scroll it up off the screen
-        if (prevScrollStopsLength && prevScrollStopsLength<256) centreMixedText(line2[prevMessage],scrollServiceYpos+ULINE3-13,u8g2_font_6x10_tf);
+        if (prevScrollStopsLength && prevScrollStopsLength<256) centreMixedText(line2[prevMessage],scrollServiceYpos+ULINE3-13+LETBANE_DY,LETBANE_ACCENT);
       }
       // Is this entry a service?
       if (line3Service<station.numServices) {
         drawUndergroundService(line3Service,scrollServiceYpos+ULINE3-1);
       } else {
-        if (scrollStopsLength<256) centreMixedText(line2[currentMessage],scrollServiceYpos+ULINE3-2,u8g2_font_6x10_tf); // Centre text if it fits
-        else drawMixedStr(0,scrollServiceYpos+ULINE3-2,line2[currentMessage],u8g2_font_6x10_tf);
+        if (scrollStopsLength<256) centreMixedText(line2[currentMessage],scrollServiceYpos+ULINE3-2+LETBANE_DY,LETBANE_ACCENT); // Centre text if it fits
+        else drawMixedStr(0,scrollServiceYpos+ULINE3-2+LETBANE_DY,line2[currentMessage],LETBANE_ACCENT);
       }
       u8g2.setMaxClipWindow();
       scrollServiceYpos--;
@@ -4194,8 +4243,8 @@ void undergroundArrivalsLoop() {
       }
     } else {
       // we're scrolling left
-      if (scrollStopsLength<256) centreMixedText(line2[currentMessage],ULINE3-1,u8g2_font_6x10_tf); // Centre text if it fits
-      else drawMixedStr(scrollStopsXpos,ULINE3-1,line2[currentMessage],u8g2_font_6x10_tf);
+      if (scrollStopsLength<256) centreMixedText(line2[currentMessage],ULINE3-1+LETBANE_DY,LETBANE_ACCENT); // Centre text if it fits
+      else drawMixedStr(scrollStopsXpos,ULINE3-1+LETBANE_DY,line2[currentMessage],LETBANE_ACCENT);
       if (scrollStopsLength < 256) {
         // we don't need to scroll this message, it fits so just set a longer timer
         serviceTimer=millis()+3000;
@@ -4214,11 +4263,11 @@ void undergroundArrivalsLoop() {
     blankArea(0,ULINE1,256,ULINE3-ULINE1);
     fullRefresh = true;
     // we're scrolling the primary service(s) into view
-    u8g2.setClipWindow(0,ULINE1,256,ULINE1+10);
+    u8g2.setClipWindow(0,ULINE1-1,256,ULINE1+12);
     if (station.numServices) drawUndergroundService(0,scrollPrimaryYpos+ULINE1-1);
-    else centreText("Der er ingen planlagte afgange fra denne station.",scrollPrimaryYpos+ULINE1-1);
+    else centreText("Der er ingen planlagte afgange fra denne station.",scrollPrimaryYpos+ULINE1-1+LETBANE_DY);
     if (station.numServices>1) {
-      u8g2.setClipWindow(0,ULINE2,256,ULINE2+10);
+      u8g2.setClipWindow(0,ULINE2-1,256,ULINE2+12);
       drawUndergroundService(1,scrollPrimaryYpos+ULINE2-1);
     }
     u8g2.setMaxClipWindow();
